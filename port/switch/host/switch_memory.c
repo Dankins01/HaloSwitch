@@ -170,8 +170,9 @@ static void read_regions(void)
 	alias_region_base = value;
 	alias_region_end = value + size;
 	value = size = 0;
-	if (R_SUCCEEDED(svcGetInfo(&value, InfoType_ShadowStackRegionAddress, CUR_PROCESS_HANDLE, 0)) &&
-		R_SUCCEEDED(svcGetInfo(&size, InfoType_ShadowStackRegionSize, CUR_PROCESS_HANDLE, 0)))
+	/* ([23.0.0+]; libnx releases before it lack the names, so the values) */
+	if (R_SUCCEEDED(svcGetInfo(&value, 37 /* InfoType_ShadowStackRegionAddress */, CUR_PROCESS_HANDLE, 0)) &&
+		R_SUCCEEDED(svcGetInfo(&size, 38 /* InfoType_ShadowStackRegionSize */, CUR_PROCESS_HANDLE, 0)))
 	{
 		shadow_region_base = value;
 		shadow_region_end = value + size;
