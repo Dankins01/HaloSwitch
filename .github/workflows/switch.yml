@@ -1,0 +1,87 @@
+# The Nintendo Switch build (port/switch/README.md): opence.nro.
+#
+# Two jobs, because the halves need different toolchains:
+#
+# - guest: the game image, built exactly as the Android port builds it
+#   (an ILP32 AArch64 image, with the runner's clang and the Android NDK's
+#   linker), plus the host's generated import table;
+# - nro: the Switch host, built with devkitA64 in devkitPro's container, with
+#   the image packed into the NRO's romfs.
+#
+# Run it from the Actions tab ("Run workflow"), or push to a branch whose
+# name starts with "switch". The .nro is the "opence-switch" artifact.
+#
+# The game data is not part of the build: the player supplies a disc image
+# of their own (port/switch/README.md).
+
+name: switch
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["switch*"]
+    paths: ["port/**", "source/**", "tools/**", "configure.py", ".github/workflows/switch.yml"]
+
+jobs:
+  guest:
+    # The runner image has the Android SDK and NDK (whose ld.lld links the
+    # image), and a clang with the arm64_32 target.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Install ninja
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          curl -fsSL -o ninja.zip https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.zip
+          unzip -q ninja.zip -d "$RUNNER_TEMP/tools" && rm ninja.zip
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@v4
+
+      # musl and SDL3's headers, which configure.py fetches
+      - uses: actions/cache@v4
+        with:
+          path: build/android/third_party
+          key: android-third-party-${{ hashFiles('tools/android_build.py') }}
+
+      - name: Build the game image
+        run: |
+          clang --version | head -1
+          python3 configure.py --release
+          ninja build/android/halo_guest.elf build/android/host/host_import_table.c
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: switch-guest
+          path: |
+            build/android/halo_guest.elf
+            build/android/host/host_import_table.c
+          retention-days: 3
+
+  nro:
+    needs: guest
+    runs-on: ubuntu-24.04
+    container: devkitpro/devkita64:latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: switch-guest
+          path: build/android
+
+      - name: Install the Switch libraries
+        run: |
+          dkp-pacman -Sy --noconfirm --needed switch-sdl2 switch-mesa switch-libdrm_nouveau
+
+      - name: Build opence.nro
+        run: |
+          ls -l build/android build/android/host
+          make -C port/switch GUEST=../../build/android -j"$(nproc)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opence-switch
+          path: port/switch/opence.nro
+          retention-days: 14
