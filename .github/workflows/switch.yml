@@ -75,10 +75,21 @@ jobs:
         run: |
           dkp-pacman -Sy --noconfirm --needed switch-sdl2 switch-mesa switch-libdrm_nouveau
 
+      # (the compiler's errors also become one annotation, readable without
+      # opening the log)
       - name: Build opence.nro
+        shell: bash
         run: |
           ls -l build/android build/android/host
-          make -C port/switch GUEST=../../build/android -j"$(nproc)"
+          set +e
+          make -C port/switch GUEST=../../build/android -j"$(nproc)" 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            report=$(grep -E -B2 -A3 "error|undefined reference|No such file|Error [0-9]" build.log | head -c 12000 \
+              | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=switch build::${report}"
+          fi
+          exit "$status"
 
       - uses: actions/upload-artifact@v4
         with:
