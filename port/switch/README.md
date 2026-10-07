@@ -101,6 +101,12 @@ Every 10 seconds `host.txt` logs the frame rate, the time of a frame, how
 much of it the swap took (the GPU's work and the display; the rest is the
 game's work on the CPU) and the texture write faults.
 
+With an empty `/switch/opence/profile.txt`, a sampling profiler runs: 500
+times a second it notes where each game thread is, and every 30 seconds
+`host.txt` lists the places sampled most (addresses in the game image, to
+name with `llvm-symbolizer --obj=halo_guest.elf`, and offsets into
+`opence.elf`). It costs a little speed; delete the file to stop it.
+
 For a steady frame rate, set `interpolation = false` under `[display]` in
 `config.toml`. The default draws a blended frame for every 60 Hz refresh,
 and when the Switch cannot keep that up the frame rate jumps between 30,

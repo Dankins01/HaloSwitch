@@ -146,6 +146,7 @@ static void reaper(void *unused)
 		finished_threads = finished->next_finished;
 		mutexUnlock(&reaper_lock);
 		threadWaitForExit(&finished->thread);
+		host_profile_thread_ended(finished->thread.handle);
 		threadClose(&finished->thread);
 		host_low_unmap(finished->mapping, finished->mapping_size);
 		free(finished);
@@ -213,7 +214,12 @@ int host_native_thread_create(void *(*function)(void *), void *argument, size_t 
 	start->stack_top = base + total;
 	result = threadCreate(&start->thread, thread_main, start, NULL, HOST_STACK_SIZE, THREAD_PRIORITY, pick_core());
 	if (R_SUCCEEDED(result))
+	{
+		host_profile_thread_started(start->thread.handle);
 		result = threadStart(&start->thread);
+		if (R_FAILED(result))
+			host_profile_thread_ended(start->thread.handle);
+	}
 	if (R_FAILED(result))
 	{
 		host_logf(HOST_LOG_ERROR, "cannot start a thread: 0x%x", result);

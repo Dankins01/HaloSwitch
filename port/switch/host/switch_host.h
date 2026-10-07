@@ -36,6 +36,8 @@ The differences that shape this host:
 
 #include "halo_android_abi.h"
 
+#include <switch/types.h>
+
 /* ---------- logging (switch_main.c): /switch/opence/host.txt and the
 debug output (svcOutputDebugString, visible with a debugger or nxlink) */
 
@@ -138,6 +140,13 @@ void host_gl_bind_functions(void);
 /* a frame was presented, its swap begun at swap_started (switch_sdl.c;
 the watchdog in switch_main.c) */
 void host_note_frame(uint64_t swap_started);
+/* the sampling profiler (switch_profile.c), with /switch/opence/profile.txt:
+started once the game image is loaded; threads that run game code are
+registered as they start and end */
+void host_profile_start(void);
+void host_profile_thread_started(Handle thread);
+void host_profile_thread_ended(Handle thread);
+
 /* ticks spent waiting for the GPU so far (switch_gl.c) */
 uint64_t host_gl_wait_ticks(void);
 /* texture write faults handled so far (switch_memory.c) */
