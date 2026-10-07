@@ -127,16 +127,45 @@ static uint32_t permission_of(int protection)
 	return Perm_None;
 }
 
-/* reprotects data aliases (AliasCodeData) */
+/* reprotects data aliases (AliasCodeData). The kernel changes a range's
+permission only when all of it has one permission now (mesosphère,
+CheckMemoryState), and the guest reprotects ranges that mix them (watched
+texture pages, pages freed and kept), so this goes block by block, as
+svcQueryMemory reports them. A block another thread changes in between
+(the fault handler making a watched page writeable) is looked at again. */
 static int set_permission(uint64_t address, uint64_t size, uint32_t permission)
 {
-	Result result = svcSetMemoryPermission((void *)(uintptr_t)address, size, permission);
+	uint64_t cursor = address, end = address + size;
+	int attempts = 0;
 
-	if (R_FAILED(result))
+	while (cursor < end)
 	{
-		host_logf(HOST_LOG_ERROR, "svcSetMemoryPermission(%010llx, %llx, %u) failed: 0x%x",
-			(unsigned long long)address, (unsigned long long)size, permission, result);
-		return -1;
+		MemoryInfo information;
+		u32 page_information;
+		uint64_t block_end;
+		Result result;
+
+		if (R_FAILED(svcQueryMemory(&information, &page_information, cursor)))
+			return -1;
+		block_end = information.addr + information.size;
+		if (block_end > end || block_end <= cursor)
+			block_end = end;
+		if ((information.perm & (Perm_R | Perm_W | Perm_X)) == permission)
+		{
+			cursor = block_end;
+			continue;
+		}
+		result = svcSetMemoryPermission((void *)(uintptr_t)cursor, block_end - cursor, permission);
+		if (R_FAILED(result))
+		{
+			if (++attempts < 4)
+				continue;
+			host_logf(HOST_LOG_ERROR, "svcSetMemoryPermission(%010llx, %llx, %u) failed: 0x%x",
+				(unsigned long long)cursor, (unsigned long long)(block_end - cursor), permission, result);
+			return -1;
+		}
+		attempts = 0;
+		cursor = block_end;
 	}
 	return 0;
 }
