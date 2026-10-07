@@ -71,9 +71,16 @@ jobs:
           name: switch-guest
           path: build/android
 
+      # (devkitPro's package server sometimes does not answer: try again)
       - name: Install the Switch libraries
+        shell: bash
         run: |
-          dkp-pacman -Sy --noconfirm --needed switch-sdl2 switch-mesa switch-libdrm_nouveau
+          for attempt in 1 2 3 4 5; do
+            dkp-pacman -Sy --noconfirm --needed switch-sdl2 switch-mesa switch-libdrm_nouveau && exit 0
+            echo "attempt $attempt failed; trying again"
+            sleep $((attempt * 15))
+          done
+          exit 1
 
       # (the compiler's errors also become one annotation, readable without
       # opening the log)
