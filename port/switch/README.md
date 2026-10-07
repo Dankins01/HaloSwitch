@@ -103,9 +103,15 @@ game's work on the CPU) and the texture write faults.
 
 With an empty `/switch/opence/profile.txt`, a sampling profiler runs: 500
 times a second it notes where each game thread is, and every 30 seconds
-`host.txt` lists the places sampled most (addresses in the game image, to
-name with `llvm-symbolizer --obj=halo_guest.elf`, and offsets into
-`opence.elf`). It costs a little speed; delete the file to stop it.
+`host.txt` gives, for each thread, how busy it was and the places it was
+sampled most (addresses in the game image, to name with
+`llvm-symbolizer --obj=halo_guest.elf`, and offsets into `opence.elf`):
+where it worked, which calls it waited in, and which game functions the
+time in `opence.elf` (the GL driver, mostly) was for. It costs a little
+speed; delete the file to stop it.
+
+The game's main thread has core 0 to itself; its other threads, audio
+among them, share cores 1 and 2.
 
 For a steady frame rate, set `interpolation = false` under `[display]` in
 `config.toml`. The default draws a blended frame for every 60 Hz refresh,

@@ -17,8 +17,14 @@ blocks or yields, except at priority 0x3B on cores 0 to 2, where the kernel
 preempts them in turn. The game busy-waits (the frame limiter spins until
 the vertical blank thread advances its counter, main.c), and a spinning
 thread that shares a core with the one it waits for would starve it: so
-the game's threads run at 0x3B, spread over cores 0 to 2. Threads that must
-run promptly (audio, switch_sdl.c) have a higher priority than that.
+the game's threads run at 0x3B. Threads that must run promptly (audio,
+switch_sdl.c) have a higher priority than that.
+
+The game's main thread does nearly all of its work (the simulation and the
+rendering), and the frame rate is its speed: it gets core 0 to itself, and
+the others (audio, the vertical blank, the game's helpers) share cores 1
+and 2. A thread of higher priority on its core, as audio is, would take
+its time from it.
 
 The guest's thread pointer (its musl struct pthread) is kept per thread in
 host TLS. Guest stacks are freed by a reaper thread once their thread has
@@ -63,7 +69,9 @@ int host_thread_number(void)
 
 /* ---------- cores */
 
-static int pick_core(void)
+/* the main thread's core, the first the process may use; the others, the
+rest (or all, with only one) */
+static int pick_core(int main_thread)
 {
 	static int cores[4];
 	static int core_count;
@@ -83,8 +91,20 @@ static int pick_core(void)
 		}
 		if (!core_count)
 			return -2;
+		host_logf(HOST_LOG_INFO, "threads: the game on core %d, the others on %d core(s) from %d", cores[0],
+			core_count > 1 ? core_count - 1 : 1, cores[core_count > 1 ? 1 : 0]);
 	}
-	return cores[__atomic_fetch_add(&next, 1, __ATOMIC_SEQ_CST) % core_count];
+	if (main_thread || core_count == 1)
+		return cores[0];
+	return cores[1 + __atomic_fetch_add(&next, 1, __ATOMIC_SEQ_CST) % (core_count - 1)];
+}
+
+void host_thread_leave_game_core(void)
+{
+	int core = pick_core(0);
+
+	if (core >= 0)
+		svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1ULL << core);
 }
 
 /* ---------- calling into the guest */
@@ -174,7 +194,7 @@ static void thread_main(void *context)
 	mutexUnlock(&reaper_lock);
 }
 
-int host_native_thread_create(void *(*function)(void *), void *argument, size_t stack_size)
+int host_native_thread_create(void *(*function)(void *), void *argument, size_t stack_size, const char *name)
 {
 	struct thread_start *start = calloc(1, sizeof(*start));
 	size_t total;
@@ -212,10 +232,11 @@ int host_native_thread_create(void *(*function)(void *), void *argument, size_t 
 	start->mapping = base;
 	start->mapping_size = total;
 	start->stack_top = base + total;
-	result = threadCreate(&start->thread, thread_main, start, NULL, HOST_STACK_SIZE, THREAD_PRIORITY, pick_core());
+	result = threadCreate(&start->thread, thread_main, start, NULL, HOST_STACK_SIZE, THREAD_PRIORITY,
+		pick_core(name && !strcmp(name, "game")));
 	if (R_SUCCEEDED(result))
 	{
-		host_profile_thread_started(start->thread.handle);
+		host_profile_thread_started(start->thread.handle, name);
 		result = threadStart(&start->thread);
 		if (R_FAILED(result))
 			host_profile_thread_ended(start->thread.handle);
@@ -238,5 +259,5 @@ static void *guest_thread_main(void *guest_thread)
 
 int host_thread_create(uint32_t guest_thread, uint32_t stack_size)
 {
-	return host_native_thread_create(guest_thread_main, (void *)(uintptr_t)guest_thread, stack_size);
+	return host_native_thread_create(guest_thread_main, (void *)(uintptr_t)guest_thread, stack_size, "guest");
 }

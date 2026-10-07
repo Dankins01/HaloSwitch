@@ -113,8 +113,10 @@ struct sdl_stream
 	unsigned long cursor;
 	/* the resampler's (resampler_reset): the last RESAMPLER_HISTORY frames
 	taken, how many were taken, the frame the output is at and how far past
-	it, and the frames of silence taken since the packets ran out */
-	float history[RESAMPLER_HISTORY][2];
+	it, and the frames of silence taken since the packets ran out. Each frame
+	is stored twice, RESAMPLER_HISTORY apart, so the frames a low pass reads
+	are side by side wherever the ring wraps */
+	float history[2 * RESAMPLER_HISTORY][2];
 	unsigned long history_count;
 	unsigned long center;
 	double phase;
@@ -490,6 +492,33 @@ static void resampler_phases_initialize(void)
 	}
 }
 
+/* the sum of count frames each weighted, for both channels. It keeps four
+running sums a channel rather than one, so that the additions do not each
+wait for the last (a vector unit does the four at once): the order the
+weighted frames are added in differs from one sum, by rounding only */
+static void resample_sum(float (*frames)[2], const float *weights, long count, float *left, float *right)
+{
+	float sum_left[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, sum_right[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	long tap = 0;
+	int lane;
+
+	for (; tap + 4 <= count; tap += 4)
+	{
+		for (lane = 0; lane < 4; lane++)
+		{
+			sum_left[lane] += frames[tap + lane][0] * weights[tap + lane];
+			sum_right[lane] += frames[tap + lane][1] * weights[tap + lane];
+		}
+	}
+	for (lane = 0; tap < count; tap++, lane++)
+	{
+		sum_left[lane] += frames[tap][0] * weights[tap];
+		sum_right[lane] += frames[tap][1] * weights[tap];
+	}
+	*left = (sum_left[0] + sum_left[1]) + (sum_left[2] + sum_left[3]);
+	*right = (sum_right[0] + sum_right[1]) + (sum_right[2] + sum_right[3]);
+}
+
 /* a voice starting (over): silence before its first frame, which the output
 starts at */
 static void resampler_reset(struct sdl_stream *stream)
@@ -603,6 +632,8 @@ static void mix_voice(struct sdl_stream *stream, float *output, float *send, uns
 				slot[0] = slot[1] = 0.0f;
 				stream->silence++;
 			}
+			slot[2 * RESAMPLER_HISTORY] = slot[0];
+			slot[2 * RESAMPLER_HISTORY + 1] = slot[1];
 			stream->history_count++;
 		}
 		if (stream->silence > (unsigned long)(2 * width))
@@ -619,27 +650,26 @@ static void mix_voice(struct sdl_stream *stream, float *output, float *send, uns
 			unsigned long row = (unsigned long)position;
 			float blend = (float)(position - (double)row);
 			const float *weights = resampler_phases[row], *next_weights = resampler_phases[row + 1];
-			unsigned long first = stream->center + 1 - RESAMPLER_ZERO_CROSSINGS;
+			float (*source)[2] = &stream->history[(stream->center + 1 - RESAMPLER_ZERO_CROSSINGS) %
+				RESAMPLER_HISTORY];
+			float blended[2 * RESAMPLER_ZERO_CROSSINGS];
 
 			for (tap = 0; tap < 2 * RESAMPLER_ZERO_CROSSINGS; tap++)
-			{
-				const float *source = stream->history[(first + (unsigned long)tap) % RESAMPLER_HISTORY];
-				float weight = weights[tap] + (next_weights[tap] - weights[tap]) * blend;
-
-				sample_left += source[0] * weight;
-				sample_right += source[1] * weight;
-			}
+				blended[tap] = weights[tap] + (next_weights[tap] - weights[tap]) * blend;
+			resample_sum(source, blended, 2 * RESAMPLER_ZERO_CROSSINGS, &sample_left, &sample_right);
 		}
 		else
 		{
-			for (tap = 1 - width; tap <= width; tap++)
-			{
-				const float *source = stream->history[(stream->center + (unsigned long)tap) % RESAMPLER_HISTORY];
-				float weight = scale * resampler_weight(fabsf((float)tap - (float)stream->phase) * scale * RESAMPLER_TABLE_STEPS);
+			float (*source)[2] = &stream->history[(stream->center + 1 - (unsigned long)width) % RESAMPLER_HISTORY];
+			float weights[4 * RESAMPLER_ZERO_CROSSINGS * RESAMPLER_MAXIMUM_STRETCH];
+			long count = 2 * width;
 
-				sample_left += source[0] * weight;
-				sample_right += source[1] * weight;
+			for (tap = 0; tap < count; tap++)
+			{
+				weights[tap] = scale * resampler_weight(fabsf((float)(tap + 1 - width) - (float)stream->phase) * scale *
+					RESAMPLER_TABLE_STEPS);
 			}
+			resample_sum(source, weights, count, &sample_left, &sample_right);
 		}
 		/* the room send, with its own low pass */
 		if (room || ramp_room)

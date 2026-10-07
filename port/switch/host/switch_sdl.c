@@ -803,11 +803,12 @@ static void SDLCALL audio_callback(void *userdata, Uint8 *stream, int length)
 	static int raised;
 	int taken;
 
-	/* SDL's own audio thread, likewise above the game's */
+	/* SDL's own audio thread, likewise above the game's, and off its core */
 	if (!raised)
 	{
 		raised = 1;
 		svcSetThreadPriority(CUR_THREAD_HANDLE, AUDIO_THREAD_PRIORITY);
+		host_thread_leave_game_core();
 	}
 	mutexLock(&binding->lock);
 	if (binding->buffer_length < length)
@@ -869,7 +870,7 @@ uint32_t host_sdl_open_audio_stream(uint32_t device, const void *spec, uint32_t 
 		frequency, channels, format, obtained.samples);
 	/* the device starts paused, so no callback runs before this */
 	binding->handle = handle_new(_handle_audio, binding);
-	if (callback && host_native_thread_create(audio_thread, binding, 256 * 1024) != 0)
+	if (callback && host_native_thread_create(audio_thread, binding, 256 * 1024, "audio") != 0)
 		host_fatal("cannot start the audio thread");
 	return binding->handle;
 }

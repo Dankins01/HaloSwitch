@@ -117,9 +117,12 @@ int host_load_image(const void *elf, size_t size);
 
 uint32_t host_call_guest(uint32_t function, uint32_t a, uint32_t b, uint32_t c, uint32_t d);
 /* starts a thread running function(argument) on a stack in guest memory;
-0 or an errno value */
-int host_native_thread_create(void *(*function)(void *), void *argument, size_t stack_size);
+0 or an errno value. The thread named "game" (the game's main thread) gets
+a core of its own (switch_thread.c); the name is also the profiler's */
+int host_native_thread_create(void *(*function)(void *), void *argument, size_t stack_size, const char *name);
 void host_run_guest_main(uint32_t boot) __attribute__((noreturn));
+/* moves the calling thread (one libnx or SDL made) off the game's core */
+void host_thread_leave_game_core(void);
 /* a small number for this thread (gettid) */
 int host_thread_number(void);
 
@@ -144,7 +147,7 @@ void host_note_frame(uint64_t swap_started);
 started once the game image is loaded; threads that run game code are
 registered as they start and end */
 void host_profile_start(void);
-void host_profile_thread_started(Handle thread);
+void host_profile_thread_started(Handle thread, const char *name);
 void host_profile_thread_ended(Handle thread);
 
 /* ticks spent waiting for the GPU so far (switch_gl.c) */

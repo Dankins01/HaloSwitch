@@ -7,11 +7,21 @@ only when /switch/opence/profile.txt exists.
 About 500 times a second it pauses each thread that runs game code
 (switch_thread.c registers them), reads where it is (svcGetThreadContext3,
 which the kernel allows on a paused thread of the process's own:
-svcSetThreadActivity), and lets it go on. Every 30 seconds it writes the
-places sampled most to the log: addresses in the game image, to be named
-with its symbols (llvm-symbolizer --obj=halo_guest.elf), and in this
-program (opence.elf, by offset). A thread waiting in the kernel shows as
-the system call it waits in, under "waiting".
+svcSetThreadActivity), and lets it go on. Every 30 seconds it writes, for
+each thread, how much of the time it was busy rather than waiting in the
+kernel, and the places it was sampled most:
+
+- "game 88xxxxxx": an address in the game image, to be named with its
+  symbols (llvm-symbolizer --obj=halo_guest.elf);
+- "opence.elf +0x...": an offset into this program (mesa, SDL, libnx and
+  the host), likewise with opence.elf;
+- "waits in opence.elf +0x...": the thread was in a system call that
+  blocks, called from there (the svc's caller: its link register).
+
+Time in this program is also added up by the game function it was called
+from ("for game 88xxxxxx"): the first game address among the thread's frame
+records, found by walking them on its stack. That says which of the game's
+own functions the GL driver's time, or a wait, is for.
 */
 
 #include "switch_host.h"
@@ -25,28 +35,77 @@ the system call it waits in, under "waiting".
 #define PROFILE_FILE SWITCH_DATA_ROOT "/profile.txt"
 #define SAMPLE_NANOSECONDS 2000000LL
 #define REPORT_SECONDS 30
-#define TOP_COUNT 30
-/* the game image's code, in buckets of this many bytes */
-#define BUCKET_SHIFT 4
-#define MAXIMUM_THREADS 48
+/* lines a thread gets in a report, of places and of game callers */
+#define TOP_PLACES 12
+#define TOP_CALLERS 8
+#define MAXIMUM_THREADS 24
+/* places in the game image are counted in buckets of 16 bytes, in this
+program of 64 */
+#define GAME_SHIFT 4
+#define HOST_SHIFT 6
+#define HOST_SPAN 0x2000000ULL
+/* each thread's counts, an open hash table (a power of 2) */
+#define TABLE_SIZE 4096
+#define MAXIMUM_FRAMES 48
+
+/* a key: the kind in the top bits, the address (bucket) below */
+#define KIND_GAME 1ULL
+#define KIND_HOST 2ULL
+#define KIND_WAIT 3ULL
+#define KIND_CALLER 4ULL
+#define KEY(kind, address) (((kind) << 56) | (address))
+#define KEY_KIND(key) ((key) >> 56)
+#define KEY_ADDRESS(key) ((key) & ((1ULL << 56) - 1))
+
+struct entry
+{
+	uint64_t key;
+	uint32_t count;
+};
+
+struct profiled_thread
+{
+	Handle handle;
+	int number;
+	char name[16];
+	uint64_t samples, busy, busy_game, busy_host;
+	struct entry *table;
+	uint32_t used;
+};
 
 static Mutex thread_lock;
-static Handle threads[MAXIMUM_THREADS];
-static int thread_count;
+static struct profiled_thread threads[MAXIMUM_THREADS];
+static int thread_count, next_number = 1;
 static int profiling;
 
-void host_profile_thread_started(Handle thread)
+void host_profile_thread_started(Handle thread, const char *name)
 {
+	struct entry *table;
+
 	if (!profiling)
+		return;
+	table = calloc(TABLE_SIZE, sizeof(struct entry));
+	if (!table)
 		return;
 	mutexLock(&thread_lock);
 	if (thread_count < MAXIMUM_THREADS)
-		threads[thread_count++] = thread;
+	{
+		struct profiled_thread *profiled = &threads[thread_count++];
+
+		memset(profiled, 0, sizeof(*profiled));
+		profiled->handle = thread;
+		profiled->number = next_number++;
+		strncpy(profiled->name, name ? name : "thread", sizeof(profiled->name) - 1);
+		profiled->table = table;
+		table = NULL;
+	}
 	mutexUnlock(&thread_lock);
+	free(table);
 }
 
 void host_profile_thread_ended(Handle thread)
 {
+	struct entry *table = NULL;
 	int index;
 
 	if (!profiling)
@@ -54,115 +113,232 @@ void host_profile_thread_ended(Handle thread)
 	mutexLock(&thread_lock);
 	for (index = 0; index < thread_count; index++)
 	{
-		if (threads[index] == thread)
+		if (threads[index].handle == thread)
 		{
+			table = threads[index].table;
 			threads[index] = threads[--thread_count];
 			break;
 		}
 	}
 	mutexUnlock(&thread_lock);
+	free(table);
 }
 
 /* ---------- the counts */
 
-static uint32_t *game_buckets;
-static uint32_t game_bucket_count;
-/* this program's code, more coarsely */
-#define HOST_BUCKET_SHIFT 6
-#define HOST_BUCKETS (0x1000000 >> HOST_BUCKET_SHIFT)
-static uint32_t *host_buckets;
-static uint64_t samples, game_samples, host_samples, other_samples;
-
-static void count(uint64_t pc)
+static void add(struct profiled_thread *thread, uint64_t key)
 {
-	uint64_t program = host_program_base();
+	uint32_t slot = (uint32_t)((key * 0x9e3779b97f4a7c15ULL) >> 52) & (TABLE_SIZE - 1);
 
-	samples++;
-	if (host_image.header && pc >= host_image.base && pc < host_image.end)
+	for (;;)
 	{
-		uint64_t bucket = (pc - host_image.base) >> BUCKET_SHIFT;
+		struct entry *entry = &thread->table[slot];
 
-		if (bucket < game_bucket_count)
-			game_buckets[bucket]++;
-		game_samples++;
-	}
-	else if (pc >= program && pc - program < ((uint64_t)HOST_BUCKETS << HOST_BUCKET_SHIFT))
-	{
-		host_buckets[(pc - program) >> HOST_BUCKET_SHIFT]++;
-		host_samples++;
-	}
-	else
-	{
-		other_samples++;
+		if (entry->key == key)
+		{
+			entry->count++;
+			return;
+		}
+		if (!entry->key)
+		{
+			/* (full enough: the rest is not counted by place) */
+			if (thread->used >= TABLE_SIZE * 3 / 4)
+				return;
+			entry->key = key;
+			entry->count = 1;
+			thread->used++;
+			return;
+		}
+		slot = (slot + 1) & (TABLE_SIZE - 1);
 	}
 }
 
-struct top
+static int in_game(uint64_t address)
 {
-	uint32_t count;
-	uint64_t address;
-	int game;
-};
+	return host_image.header && address >= host_image.base && address < host_image.end;
+}
 
-static void consider(struct top *tops, uint32_t value, uint64_t address, int game)
+static int in_host(uint64_t address)
 {
-	int index, smallest = 0;
+	uint64_t program = host_program_base();
 
-	for (index = 1; index < TOP_COUNT; index++)
+	return address >= program && address - program < HOST_SPAN;
+}
+
+/* the first game address among the frame records from fp up, within the
+stack's memory (the block holding sp); 0 if there is none */
+static uint64_t game_caller(uint64_t fp, uint64_t sp)
+{
+	MemoryInfo information;
+	u32 page_information;
+	uint64_t end;
+	int depth;
+
+	if (R_FAILED(svcQueryMemory(&information, &page_information, sp)) || !(information.perm & Perm_R))
+		return 0;
+	end = information.addr + information.size;
+	for (depth = 0; depth < MAXIMUM_FRAMES; depth++)
 	{
-		if (tops[index].count < tops[smallest].count)
-			smallest = index;
+		const uint64_t *record;
+		uint64_t return_address;
+
+		if (fp < sp || fp + 16 > end || (fp & 7))
+			return 0;
+		record = (const uint64_t *)(uintptr_t)fp;
+		return_address = record[1];
+		if (in_game(return_address))
+			return return_address;
+		if (record[0] <= fp)
+			return 0;
+		fp = record[0];
 	}
-	if (value > tops[smallest].count)
+	return 0;
+}
+
+static void sample(struct profiled_thread *thread, const ThreadContext *context)
+{
+	uint64_t pc = context->pc.x;
+	uint64_t program = host_program_base();
+
+	thread->samples++;
+	if (in_game(pc))
 	{
-		tops[smallest].count = value;
-		tops[smallest].address = address;
-		tops[smallest].game = game;
+		thread->busy++;
+		thread->busy_game++;
+		add(thread, KEY(KIND_GAME, (pc - host_image.base) >> GAME_SHIFT));
+		return;
+	}
+	if (!in_host(pc))
+	{
+		thread->busy++;
+		return;
+	}
+	/* a thread blocked in the kernel stands just past its svc instruction */
+	if ((pc & 3) == 0 && (*(const uint32_t *)(uintptr_t)(pc - 4) & 0xffe0001f) == 0xd4000001)
+	{
+		uint64_t caller = context->lr.x;
+
+		add(thread, in_host(caller) ? KEY(KIND_WAIT, caller - program) : KEY(KIND_WAIT, 0));
+	}
+	else
+	{
+		thread->busy++;
+		thread->busy_host++;
+		add(thread, KEY(KIND_HOST, (pc - program) >> HOST_SHIFT));
+	}
+	{
+		uint64_t caller = game_caller(context->fp.x, context->sp.x);
+
+		if (caller)
+			add(thread, KEY(KIND_CALLER, (caller - host_image.base) >> GAME_SHIFT));
+	}
+}
+
+/* ---------- reports */
+
+static void top(const struct profiled_thread *thread, int callers, struct entry *tops, int count)
+{
+	uint32_t index;
+
+	memset(tops, 0, (size_t)count * sizeof(*tops));
+	for (index = 0; index < TABLE_SIZE; index++)
+	{
+		const struct entry *entry = &thread->table[index];
+		int smallest = 0, slot;
+
+		if (!entry->key || (KEY_KIND(entry->key) == KIND_CALLER) != callers)
+			continue;
+		for (slot = 1; slot < count; slot++)
+		{
+			if (tops[slot].count < tops[smallest].count)
+				smallest = slot;
+		}
+		if (entry->count > tops[smallest].count)
+			tops[smallest] = *entry;
 	}
 }
 
 static int by_count(const void *a, const void *b)
 {
-	const struct top *x = a, *y = b;
+	const struct entry *x = a, *y = b;
 
 	return x->count < y->count ? 1 : x->count > y->count ? -1 : 0;
 }
 
+static void describe(char *buffer, size_t size, uint64_t key)
+{
+	uint64_t address = KEY_ADDRESS(key);
+
+	switch (KEY_KIND(key))
+	{
+	case KIND_GAME:
+		snprintf(buffer, size, "game %08llx", (unsigned long long)(host_image.base + (address << GAME_SHIFT)));
+		break;
+	case KIND_HOST:
+		snprintf(buffer, size, "opence.elf +0x%llx", (unsigned long long)(address << HOST_SHIFT));
+		break;
+	case KIND_WAIT:
+		snprintf(buffer, size, "waits in opence.elf +0x%llx", (unsigned long long)address);
+		break;
+	default:
+		snprintf(buffer, size, "for game %08llx", (unsigned long long)(host_image.base + (address << GAME_SHIFT)));
+		break;
+	}
+}
+
+static void report_thread(struct profiled_thread *thread)
+{
+	struct entry places[TOP_PLACES], callers[TOP_CALLERS];
+	double samples = (double)thread->samples;
+	int index;
+	s32 priority = 0, core = -1;
+	u64 affinity = 0;
+
+	if (!thread->samples)
+		return;
+	svcGetThreadPriority(&priority, thread->handle);
+	svcGetThreadCoreMask(&core, &affinity, thread->handle);
+	host_logf(HOST_LOG_INFO, "profile: thread %d (%s, core %d, priority 0x%x): busy %.1f%% (game %.1f%%, "
+		"opence.elf %.1f%%), waiting %.1f%%", thread->number, thread->name, (int)core, (unsigned)priority,
+		100.0 * (double)thread->busy / samples, 100.0 * (double)thread->busy_game / samples,
+		100.0 * (double)thread->busy_host / samples, 100.0 * (double)(thread->samples - thread->busy) / samples);
+	top(thread, 0, places, TOP_PLACES);
+	qsort(places, TOP_PLACES, sizeof(places[0]), by_count);
+	for (index = 0; index < TOP_PLACES && places[index].count; index++)
+	{
+		char text[64];
+
+		/* (under half a percent: noise) */
+		if (places[index].count * 200 < thread->samples)
+			break;
+		describe(text, sizeof(text), places[index].key);
+		host_logf(HOST_LOG_INFO, "profile %d.%-2d %5.1f%% %s", thread->number, index + 1,
+			100.0 * (double)places[index].count / samples, text);
+	}
+	top(thread, 1, callers, TOP_CALLERS);
+	qsort(callers, TOP_CALLERS, sizeof(callers[0]), by_count);
+	for (index = 0; index < TOP_CALLERS && callers[index].count; index++)
+	{
+		char text[64];
+
+		if (callers[index].count * 100 < thread->samples)
+			break;
+		describe(text, sizeof(text), callers[index].key);
+		host_logf(HOST_LOG_INFO, "profile %d.c%-2d %5.1f%% in opence.elf %s", thread->number, index + 1,
+			100.0 * (double)callers[index].count / samples, text);
+	}
+	memset(thread->table, 0, TABLE_SIZE * sizeof(struct entry));
+	thread->used = 0;
+	thread->samples = thread->busy = thread->busy_game = thread->busy_host = 0;
+}
+
 static void report(void)
 {
-	struct top tops[TOP_COUNT];
-	uint64_t index;
-	int rank;
+	int index;
 
-	if (!samples)
-		return;
-	memset(tops, 0, sizeof(tops));
-	for (index = 0; index < game_bucket_count; index++)
-	{
-		if (game_buckets[index])
-			consider(tops, game_buckets[index], host_image.base + (index << BUCKET_SHIFT), 1);
-	}
-	for (index = 0; index < HOST_BUCKETS; index++)
-	{
-		if (host_buckets[index])
-			consider(tops, host_buckets[index], index << HOST_BUCKET_SHIFT, 0);
-	}
-	qsort(tops, TOP_COUNT, sizeof(tops[0]), by_count);
-	host_logf(HOST_LOG_INFO, "profile: %llu samples, %.1f%% in the game, %.1f%% in opence.elf (waiting there "
-		"included), %.1f%% elsewhere", (unsigned long long)samples, 100.0 * (double)game_samples / (double)samples,
-		100.0 * (double)host_samples / (double)samples, 100.0 * (double)other_samples / (double)samples);
-	for (rank = 0; rank < TOP_COUNT && tops[rank].count; rank++)
-	{
-		if (tops[rank].game)
-			host_logf(HOST_LOG_INFO, "profile %2d: %5.1f%% game %08llx", rank + 1,
-				100.0 * (double)tops[rank].count / (double)samples, (unsigned long long)tops[rank].address);
-		else
-			host_logf(HOST_LOG_INFO, "profile %2d: %5.1f%% opence.elf +0x%llx", rank + 1,
-				100.0 * (double)tops[rank].count / (double)samples, (unsigned long long)tops[rank].address);
-	}
-	memset(game_buckets, 0, game_bucket_count * sizeof(uint32_t));
-	memset(host_buckets, 0, HOST_BUCKETS * sizeof(uint32_t));
-	samples = game_samples = host_samples = other_samples = 0;
+	host_logf(HOST_LOG_INFO, "profile: the last %d s, %d threads", REPORT_SECONDS, thread_count);
+	for (index = 0; index < thread_count; index++)
+		report_thread(&threads[index]);
 }
 
 /* ---------- sampling */
@@ -182,18 +358,18 @@ static void sampler(void *unused)
 		{
 			ThreadContext context;
 
-			if (R_FAILED(svcSetThreadActivity(threads[index], ThreadActivity_Paused)))
+			if (R_FAILED(svcSetThreadActivity(threads[index].handle, ThreadActivity_Paused)))
 				continue;
-			if (R_SUCCEEDED(svcGetThreadContext3(&context, threads[index])))
-				count(context.pc.x);
-			svcSetThreadActivity(threads[index], ThreadActivity_Runnable);
+			if (R_SUCCEEDED(svcGetThreadContext3(&context, threads[index].handle)))
+				sample(&threads[index], &context);
+			svcSetThreadActivity(threads[index].handle, ThreadActivity_Runnable);
 		}
-		mutexUnlock(&thread_lock);
 		if (armGetSystemTick() - last_report >= (uint64_t)REPORT_SECONDS * frequency)
 		{
 			report();
 			last_report = armGetSystemTick();
 		}
+		mutexUnlock(&thread_lock);
 	}
 }
 
@@ -205,11 +381,6 @@ void host_profile_start(void)
 	if (stat(PROFILE_FILE, &information) != 0 || !host_image.header)
 		return;
 	mutexInit(&thread_lock);
-	game_bucket_count = (host_image.end - host_image.base) >> BUCKET_SHIFT;
-	game_buckets = calloc(game_bucket_count, sizeof(uint32_t));
-	host_buckets = calloc(HOST_BUCKETS, sizeof(uint32_t));
-	if (!game_buckets || !host_buckets)
-		return;
 	profiling = 1;
 	/* above the game's threads (0x3b), so it runs when they are busy */
 	if (R_FAILED(threadCreate(&thread, sampler, NULL, NULL, 0x8000, 0x2a, -2)) || R_FAILED(threadStart(&thread)))

@@ -670,7 +670,7 @@ int main(int argc, char *argv[])
 	start_watchdog();
 	host_profile_start();
 	host_logf(HOST_LOG_INFO, "starting the game thread");
-	if (host_native_thread_create(game_main, NULL, MAIN_STACK_SIZE) != 0)
+	if (host_native_thread_create(game_main, NULL, MAIN_STACK_SIZE, "game") != 0)
 		host_fatal("cannot start the game thread");
 	/* the game ends the process itself (host_exit); SDL handles the
 	applet's messages on the game's thread */
