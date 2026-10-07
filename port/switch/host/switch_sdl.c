@@ -339,6 +339,7 @@ int host_sdl_gl_swap_window(uint32_t window)
 	if (!object)
 		return 0;
 	SDL_GL_SwapWindow(object);
+	host_note_frame();
 	return 1;
 }
 

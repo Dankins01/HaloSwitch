@@ -135,6 +135,9 @@ void *host_gl_resolve(const char *name);
 /* the GL functions switch_gl.c calls itself, once a context exists */
 void host_gl_bind_functions(void);
 
+/* a frame was presented (switch_sdl.c; the watchdog in switch_main.c) */
+void host_note_frame(void);
+
 /* ---------- the game data (switch_main.c, xiso.c) */
 
 /* copies <data>/maps out of a disc image in the data folder if the game

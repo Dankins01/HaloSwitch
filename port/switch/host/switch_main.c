@@ -416,6 +416,70 @@ static void copy_file(const char *from, const char *to)
 	free(data);
 }
 
+/* ---------- the frame watchdog
+
+Counts the frames the game presents (host_note_frame, from
+switch_sdl.c), writes the frame rate to the log every ten seconds, and
+notes when no frame has come for three seconds: a game stalled with its
+sound still playing looks like controls that do nothing. */
+
+static volatile uint64_t frames_presented;
+static volatile uint64_t last_frame_tick;
+
+void host_note_frame(void)
+{
+	__atomic_add_fetch(&frames_presented, 1, __ATOMIC_RELAXED);
+	last_frame_tick = armGetSystemTick();
+}
+
+static void watchdog(void *unused)
+{
+	uint64_t frequency = armGetSystemTickFreq();
+	uint64_t window_start = armGetSystemTick(), window_frames = 0;
+	int stalled = 0;
+
+	(void)unused;
+	for (;;)
+	{
+		uint64_t now, frames, last;
+
+		svcSleepThread(1000000000LL);
+		now = armGetSystemTick();
+		frames = frames_presented;
+		last = last_frame_tick;
+		if (!frames)
+			continue;
+		if (now - last > 3 * frequency)
+		{
+			if (!stalled)
+				host_logf(HOST_LOG_WARN, "no frame drawn for %llu s (%llu so far): the game is stalled",
+					(unsigned long long)((now - last) / frequency), (unsigned long long)frames);
+			stalled = 1;
+		}
+		else if (stalled)
+		{
+			host_logf(HOST_LOG_INFO, "frames again");
+			stalled = 0;
+		}
+		if (now - window_start >= 10 * frequency)
+		{
+			double seconds = (double)(now - window_start) / (double)frequency;
+
+			host_logf(HOST_LOG_INFO, "%.1f frames a second", (double)(frames - window_frames) / seconds);
+			window_start = now;
+			window_frames = frames;
+		}
+	}
+}
+
+static void start_watchdog(void)
+{
+	static Thread thread;
+
+	if (R_FAILED(threadCreate(&thread, watchdog, NULL, NULL, 0x4000, 0x2c, -2)) || R_FAILED(threadStart(&thread)))
+		host_logf(HOST_LOG_WARN, "no frame watchdog");
+}
+
 /* ---------- main */
 
 #define MAIN_STACK_SIZE (16 * 1024 * 1024)
@@ -501,6 +565,7 @@ int main(int argc, char *argv[])
 	boot_block = make_boot(&environment);
 	host_memory_describe();
 
+	start_watchdog();
 	host_logf(HOST_LOG_INFO, "starting the game thread");
 	if (host_native_thread_create(game_main, NULL, MAIN_STACK_SIZE) != 0)
 		host_fatal("cannot start the game thread");

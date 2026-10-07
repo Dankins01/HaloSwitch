@@ -13,8 +13,12 @@ state (its TLS, newlib's reentrancy data) stays where libnx put it; only
 the stack pointer moves.
 
 Horizon threads of equal priority on a core take turns only when one
-blocks or yields, so the threads are spread over the cores the process may
-use.
+blocks or yields, except at priority 0x3B on cores 0 to 2, where the kernel
+preempts them in turn. The game busy-waits (the frame limiter spins until
+the vertical blank thread advances its counter, main.c), and a spinning
+thread that shares a core with the one it waits for would starve it: so
+the game's threads run at 0x3B, spread over cores 0 to 2. Threads that must
+run promptly (audio, switch_sdl.c) have a higher priority than that.
 
 The guest's thread pointer (its musl struct pthread) is kept per thread in
 host TLS. Guest stacks are freed by a reaper thread once their thread has
@@ -31,7 +35,10 @@ exited.
 
 #define GUARD_SIZE 0x4000
 #define HOST_STACK_SIZE 0x20000
-#define THREAD_PRIORITY 0x2c
+/* the game's threads: preemptive (see above) */
+#define THREAD_PRIORITY 0x3b
+/* the host's own (the reaper), which only wake to do a little */
+#define HOST_THREAD_PRIORITY 0x2c
 
 static __thread uint32_t guest_tp;
 static __thread int thread_number;
@@ -68,7 +75,8 @@ static int pick_core(void)
 		int core;
 
 		svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
-		for (core = 0; core < 4; core++)
+		/* (0x3B preempts on cores 0 to 2 only) */
+		for (core = 0; core < 3; core++)
 		{
 			if (mask & (1ULL << core))
 				cores[core_count++] = core;
@@ -177,7 +185,7 @@ int host_native_thread_create(void *(*function)(void *), void *argument, size_t 
 	mutexLock(&reaper_lock);
 	if (!reaper_started)
 	{
-		if (R_SUCCEEDED(threadCreate(&reaper_thread, reaper, NULL, NULL, 0x4000, THREAD_PRIORITY, -2)) &&
+		if (R_SUCCEEDED(threadCreate(&reaper_thread, reaper, NULL, NULL, 0x4000, HOST_THREAD_PRIORITY, -2)) &&
 			R_SUCCEEDED(threadStart(&reaper_thread)))
 		{
 			reaper_started = 1;
