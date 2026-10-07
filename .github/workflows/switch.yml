@@ -44,26 +44,18 @@ jobs:
           path: build/android/third_party
           key: android-third-party-${{ hashFiles('tools/android_build.py') }}
 
-      # clang 22, which the committed optimisation profile (pgo/) needs; the
-      # runner's own clang is older and builds without it
-      - name: Install clang 22
-        run: |
-          wget -q https://apt.llvm.org/llvm.sh
-          sudo bash llvm.sh 22
-          clang-22 --version | head -1
-
-      # tuned for the Switch's Cortex-A57 (the instructions are ARMv8.0 all
-      # the same), with the profile
+      # Tuned for the Switch's Cortex-A57 (the instructions are ARMv8.0 all
+      # the same). Built without the committed optimisation profile (pgo/):
+      # the build that used it (clang 22) ran the main menu at 41 frames a
+      # second against 47 without, its code 10% smaller. The suspicion, not
+      # yet shown: the profile was recorded on the PC build, and code it
+      # does not match is optimised as cold
       - name: Build the game image
         env:
           HALO_GUEST_CPU: cortex-a57
         run: |
-          python3 configure.py --release --android-guest-cc clang-22
-          if grep -q "fprofile-use" build.ninja; then
-            echo "::notice title=game image::built with the optimisation profile, for the Cortex-A57"
-          else
-            echo "::warning title=game image::built WITHOUT the optimisation profile"
-          fi
+          clang --version | head -1
+          python3 configure.py --release --pgo=off
           ninja build/android/halo_guest.elf build/android/host/host_import_table.c
 
       - uses: actions/upload-artifact@v4
