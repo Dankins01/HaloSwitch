@@ -88,6 +88,19 @@ can get a console banned from online services. The forwarder opens the
 `.nro` at the path it was made for: keep `/switch/opence/opence.nro`
 there. Forwarders are not tested with this port.
 
+### Faster clocks (optional)
+
+Create an empty file `/switch/opence/boost.txt` to run the CPU at 1785 MHz
+(the rate of Nintendo's own CPU boost mode) and the GPU at the top of
+Nintendo's normal range (460.8 MHz handheld, 768 MHz docked). It uses more
+battery and runs warmer. The original clocks come back when the game ends;
+after a crash, the next program you start resets them. `host.txt` logs the
+clocks at start-up and on docking.
+
+Every 10 seconds `host.txt` logs the frame rate, the time of a frame, how
+much of it the swap took (the GPU's work and the display; the rest is the
+game's work on the CPU) and the texture write faults.
+
 For a steady frame rate, set `interpolation = false` under `[display]` in
 `config.toml`. The default draws a blended frame for every 60 Hz refresh,
 and when the Switch cannot keep that up the frame rate jumps between 30,

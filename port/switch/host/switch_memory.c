@@ -745,6 +745,13 @@ static void mark_written(uint64_t page)
 	set_permission(HALO_GUEST_WINDOW_BASE + page * PAGE, PAGE, Perm_Rw);
 }
 
+static volatile uint64_t watch_faults;
+
+uint64_t host_memory_watch_faults(void)
+{
+	return watch_faults;
+}
+
 int host_memory_watch_fault(uint64_t address)
 {
 	uint64_t page;
@@ -757,6 +764,7 @@ int host_memory_watch_fault(uint64_t address)
 	if (page_protected[page])
 	{
 		mark_written(page);
+		watch_faults++;
 		return 1;
 	}
 	/* another thread's write to the same page was handled first: the

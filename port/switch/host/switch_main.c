@@ -113,10 +113,12 @@ void host_logf(int priority, const char *format, ...)
 
 /* ends the process: back to the Home menu (hbloader cannot reuse a process
 whose memory is mapped below 4 GB for the guest) */
+static void clocks_restore(void);
 static void leave(int code) __attribute__((noreturn));
 static void leave(int code)
 {
 	host_logf(HOST_LOG_INFO, "leaving (%d)", code);
+	clocks_restore();
 	mutexLock(&log_lock);
 	if (log_fd >= 0)
 	{
@@ -425,25 +427,110 @@ sound still playing looks like controls that do nothing. */
 
 static volatile uint64_t frames_presented;
 static volatile uint64_t last_frame_tick;
+/* ticks spent in the swap (waiting for the GPU and the display) */
+static volatile uint64_t swap_ticks;
 
-void host_note_frame(void)
+void host_note_frame(uint64_t swap_started)
 {
+	uint64_t now = armGetSystemTick();
+
 	__atomic_add_fetch(&frames_presented, 1, __ATOMIC_RELAXED);
-	last_frame_tick = armGetSystemTick();
+	__atomic_add_fetch(&swap_ticks, now - swap_started, __ATOMIC_RELAXED);
+	last_frame_tick = now;
+}
+
+/* ---------- clocks
+
+The clocks are read at start-up and when the console is docked or
+undocked. With /switch/opence/boost.txt present, the CPU runs at 1785 MHz
+(the rate of Nintendo's own CPU boost mode) and the GPU at the top of
+Nintendo's normal range for the mode (460.8 MHz handheld, 768 MHz docked);
+the clocks the game started with come back when it ends. */
+
+#define BOOST_FILE SWITCH_DATA_ROOT "/boost.txt"
+#define BOOST_CPU_HZ 1785000000u
+#define BOOST_GPU_HANDHELD_HZ 460800000u
+#define BOOST_GPU_DOCKED_HZ 768000000u
+
+static ClkrstSession cpu_clock, gpu_clock, memory_clock;
+static int clocks_open, boosting;
+static u32 original_cpu_hz, original_gpu_hz;
+
+static void clocks_open_sessions(void)
+{
+	if (clocks_open)
+		return;
+	clocks_open = -1;
+	if (R_FAILED(clkrstInitialize()))
+	{
+		host_logf(HOST_LOG_WARN, "clocks: the clock service is not available to this program");
+		return;
+	}
+	if (R_FAILED(clkrstOpenSession(&cpu_clock, PcvModuleId_CpuBus, 3)) ||
+		R_FAILED(clkrstOpenSession(&gpu_clock, PcvModuleId_GPU, 3)) ||
+		R_FAILED(clkrstOpenSession(&memory_clock, PcvModuleId_EMC, 3)))
+	{
+		host_logf(HOST_LOG_WARN, "clocks: cannot open the clock sessions");
+		return;
+	}
+	clocks_open = 1;
+}
+
+static void clocks_apply(void)
+{
+	struct stat information;
+	u32 cpu = 0, gpu = 0, memory = 0;
+	int docked = appletGetOperationMode() == AppletOperationMode_Console;
+
+	clocks_open_sessions();
+	if (clocks_open != 1)
+		return;
+	if (!boosting && stat(BOOST_FILE, &information) == 0)
+	{
+		clkrstGetClockRate(&cpu_clock, &original_cpu_hz);
+		clkrstGetClockRate(&gpu_clock, &original_gpu_hz);
+		boosting = 1;
+	}
+	if (boosting)
+	{
+		clkrstSetClockRate(&cpu_clock, BOOST_CPU_HZ);
+		clkrstSetClockRate(&gpu_clock, docked ? BOOST_GPU_DOCKED_HZ : BOOST_GPU_HANDHELD_HZ);
+	}
+	clkrstGetClockRate(&cpu_clock, &cpu);
+	clkrstGetClockRate(&gpu_clock, &gpu);
+	clkrstGetClockRate(&memory_clock, &memory);
+	host_logf(HOST_LOG_INFO, "clocks (%s%s): CPU %u MHz, GPU %.1f MHz, memory %u MHz", docked ? "docked" : "handheld",
+		boosting ? ", boost.txt" : "", cpu / 1000000, gpu / 1000000.0, memory / 1000000);
+}
+
+static void clocks_restore(void)
+{
+	if (clocks_open == 1 && boosting)
+	{
+		clkrstSetClockRate(&cpu_clock, original_cpu_hz);
+		clkrstSetClockRate(&gpu_clock, original_gpu_hz);
+	}
 }
 
 static void watchdog(void *unused)
 {
 	uint64_t frequency = armGetSystemTickFreq();
-	uint64_t window_start = armGetSystemTick(), window_frames = 0;
+	uint64_t window_start = armGetSystemTick(), window_frames = 0, window_swap = 0, window_faults = 0;
+	AppletOperationMode mode = appletGetOperationMode();
 	int stalled = 0;
 
 	(void)unused;
+	clocks_apply();
 	for (;;)
 	{
 		uint64_t now, frames, last;
 
 		svcSleepThread(1000000000LL);
+		if (appletGetOperationMode() != mode)
+		{
+			mode = appletGetOperationMode();
+			clocks_apply();
+		}
 		now = armGetSystemTick();
 		frames = frames_presented;
 		last = last_frame_tick;
@@ -464,10 +551,20 @@ static void watchdog(void *unused)
 		if (now - window_start >= 10 * frequency)
 		{
 			double seconds = (double)(now - window_start) / (double)frequency;
+			uint64_t count = frames - window_frames;
+			uint64_t swap = swap_ticks, faults = host_memory_watch_faults();
 
-			host_logf(HOST_LOG_INFO, "%.1f frames a second", (double)(frames - window_frames) / seconds);
+			/* the frame's time, and how much of it the swap took (the
+			GPU's work and the display); the rest is the game's work on the
+			CPU */
+			host_logf(HOST_LOG_INFO, "%.1f frames a second: %.1f ms a frame, %.1f ms of it in the swap; %llu texture write faults",
+				(double)count / seconds, count ? seconds * 1000.0 / (double)count : 0.0,
+				count ? (double)(swap - window_swap) * 1000.0 / (double)frequency / (double)count : 0.0,
+				(unsigned long long)(faults - window_faults));
 			window_start = now;
 			window_frames = frames;
+			window_swap = swap;
+			window_faults = faults;
 		}
 	}
 }

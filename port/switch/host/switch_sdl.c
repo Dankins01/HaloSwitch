@@ -197,6 +197,11 @@ static int rumble_prepare(int index)
 		host_logf(HOST_LOG_WARN, "controller %d: no rumble (0x%x)", index + 1, result);
 		rumble->handle_count = 0;
 	}
+	else
+	{
+		host_logf(HOST_LOG_INFO, "controller %d: rumble on %d device(s), id %d, style 0x%x", index + 1,
+			rumble->handle_count, (int)id, style);
+	}
 	return rumble->handle_count;
 }
 
@@ -226,7 +231,16 @@ static void rumble_send(int index, uint32_t low, uint32_t high)
 			values[device].amp_high = (float)high / 65535.0f;
 			values[device].freq_high = 320.0f;
 		}
-		hidSendVibrationValues(rumble->handles, values, count);
+		{
+			static int reported;
+			Result result = hidSendVibrationValues(rumble->handles, values, count);
+
+			if (R_FAILED(result) && !reported)
+			{
+				reported = 1;
+				host_logf(HOST_LOG_WARN, "controller %d: rumble not sent (0x%x)", index + 1, result);
+			}
+		}
 	}
 }
 
@@ -473,8 +487,12 @@ int host_sdl_gl_swap_window(uint32_t window)
 
 	if (!object)
 		return 0;
-	SDL_GL_SwapWindow(object);
-	host_note_frame();
+	{
+		uint64_t started = armGetSystemTick();
+
+		SDL_GL_SwapWindow(object);
+		host_note_frame(started);
+	}
 	return 1;
 }
 
@@ -665,6 +683,20 @@ int host_sdl_rumble_gamepad(uint32_t gamepad, uint32_t low, uint32_t high, uint3
 	if (!pad_of(gamepad))
 		return 0;
 	index = (int)gamepad - 1;
+	if (low || high)
+	{
+		static int reported;
+
+		if (!reported)
+		{
+			bool permitted = true;
+
+			reported = 1;
+			hidIsVibrationPermitted(&permitted);
+			host_logf(HOST_LOG_INFO, "the game asks controller %d to rumble (%u, %u); the console %s vibration",
+				index + 1, low, high, permitted ? "allows" : "has turned off");
+		}
+	}
 	rumble_send(index, low, high);
 	if (low || high)
 	{
