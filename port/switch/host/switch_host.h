@@ -138,6 +138,8 @@ void host_gl_bind_functions(void);
 /* a frame was presented, its swap begun at swap_started (switch_sdl.c;
 the watchdog in switch_main.c) */
 void host_note_frame(uint64_t swap_started);
+/* ticks spent waiting for the GPU so far (switch_gl.c) */
+uint64_t host_gl_wait_ticks(void);
 /* texture write faults handled so far (switch_memory.c) */
 uint64_t host_memory_watch_faults(void);
 

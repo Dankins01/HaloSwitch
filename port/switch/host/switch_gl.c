@@ -13,6 +13,8 @@ buffer writes are unsynchronized and frames fenced.
 
 #include "switch_host.h"
 
+#include <switch.h>
+
 #include <string.h>
 
 /* mesa's libEGL (the one EGL function used here, declared without
@@ -144,11 +146,25 @@ void host_gl_fence_frame(uint32_t slot)
 	frame_fences[slot] = gl_fence_sync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 }
 
+/* ticks spent waiting for the GPU to finish an earlier frame (the
+watchdog's line in switch_main.c): the CPU idles there when the GPU is the
+slower */
+static volatile uint64_t gpu_wait_ticks;
+
+uint64_t host_gl_wait_ticks(void)
+{
+	return gpu_wait_ticks;
+}
+
 void host_gl_wait_frame(uint32_t slot)
 {
+	uint64_t started;
+
 	if (slot >= FRAME_FENCE_SLOTS || !frame_fences[slot])
 		return;
+	started = armGetSystemTick();
 	gl_client_wait_sync(frame_fences[slot], GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+	__atomic_add_fetch(&gpu_wait_ticks, armGetSystemTick() - started, __ATOMIC_RELAXED);
 	gl_delete_sync(frame_fences[slot]);
 	frame_fences[slot] = NULL;
 }

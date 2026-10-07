@@ -516,6 +516,7 @@ static void watchdog(void *unused)
 {
 	uint64_t frequency = armGetSystemTickFreq();
 	uint64_t window_start = armGetSystemTick(), window_frames = 0, window_swap = 0, window_faults = 0;
+	uint64_t window_gpu = 0;
 	AppletOperationMode mode = appletGetOperationMode();
 	int stalled = 0;
 
@@ -552,15 +553,19 @@ static void watchdog(void *unused)
 		{
 			double seconds = (double)(now - window_start) / (double)frequency;
 			uint64_t count = frames - window_frames;
-			uint64_t swap = swap_ticks, faults = host_memory_watch_faults();
+			uint64_t swap = swap_ticks, faults = host_memory_watch_faults(), gpu = host_gl_wait_ticks();
+			double per_frame = count ? 1000.0 / (double)frequency / (double)count : 0.0;
 
-			/* the frame's time, and how much of it the swap took (the
-			GPU's work and the display); the rest is the game's work on the
-			CPU */
-			host_logf(HOST_LOG_INFO, "%.1f frames a second: %.1f ms a frame, %.1f ms of it in the swap; %llu texture write faults",
+			/* the frame's time, and the parts of it the CPU spent waiting:
+			for the GPU to finish an earlier frame, and in the swap. The rest
+			is the game's own work on the CPU: a GPU-bound game waits a lot,
+			a CPU-bound one hardly at all */
+			host_logf(HOST_LOG_INFO, "%.1f frames a second: %.1f ms a frame, %.1f ms of it waiting for the GPU, "
+				"%.1f ms in the swap; %llu texture write faults",
 				(double)count / seconds, count ? seconds * 1000.0 / (double)count : 0.0,
-				count ? (double)(swap - window_swap) * 1000.0 / (double)frequency / (double)count : 0.0,
+				(double)(gpu - window_gpu) * per_frame, (double)(swap - window_swap) * per_frame,
 				(unsigned long long)(faults - window_faults));
+			window_gpu = gpu;
 			window_start = now;
 			window_frames = frames;
 			window_swap = swap;

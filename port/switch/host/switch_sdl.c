@@ -28,6 +28,7 @@ motor), and stops when the game stops asking for it.
 #include <switch.h>
 #include <SDL2/SDL.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -205,6 +206,23 @@ static int rumble_prepare(int index)
 	return rumble->handle_count;
 }
 
+/* An Xbox motor speed (0 to 65535) as an HD rumble amplitude (0 to 1). The
+game's speeds are small (a few percent for most effects, 669 and 1673 for
+one that was logged); the Xbox's motors were felt at those, HD rumble at
+that amplitude is not. A square root keeps the order of the effects and
+brings the small ones up (2% becomes 14%, 25% becomes 50%), and the most
+is 0.9, as HD rumble is strong. */
+static float rumble_amplitude(uint32_t speed)
+{
+	float value = (float)speed / 65535.0f;
+
+	if (value <= 0.0f)
+		return 0.0f;
+	if (value > 1.0f)
+		value = 1.0f;
+	return 0.9f * sqrtf(value);
+}
+
 static void rumble_send(int index, uint32_t low, uint32_t high)
 {
 	struct rumble *rumble = &rumbles[index];
@@ -226,9 +244,9 @@ static void rumble_send(int index, uint32_t low, uint32_t high)
 		{
 			/* the Xbox's heavy motor as the low band, its light one as the
 			high band, on both sides */
-			values[device].amp_low = (float)low / 65535.0f;
+			values[device].amp_low = rumble_amplitude(low);
 			values[device].freq_low = 160.0f;
-			values[device].amp_high = (float)high / 65535.0f;
+			values[device].amp_high = rumble_amplitude(high);
 			values[device].freq_high = 320.0f;
 		}
 		{
