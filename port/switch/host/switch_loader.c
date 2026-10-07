@@ -172,6 +172,7 @@ int host_load_image(const void *file, size_t size)
 	/* the code was written through the data cache at its heap address:
 	clean it to memory before it runs from the alias */
 	armDCacheFlush(backing, high - low);
+	host_logf(HOST_LOG_INFO, "mapping the guest image");
 	if (host_image_map(backing, permissions) != 0)
 	{
 		host_logf(HOST_LOG_ERROR, "cannot map the guest image");
@@ -179,6 +180,7 @@ int host_load_image(const void *file, size_t size)
 	}
 	free(permissions);
 	armICacheInvalidate((void *)(uintptr_t)low, high - low);
+	host_logf(HOST_LOG_INFO, "guest image mapped");
 
 	host_image.header = (const struct halo_guest_header *)(uintptr_t)low;
 	host_image.base = (uint32_t)low;

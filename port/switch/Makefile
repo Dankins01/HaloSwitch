@@ -20,6 +20,8 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET      := opence
 BUILD       := build
 GUEST       ?= ../../build/android
+# (in the log's first line, to match a crash to its build)
+SWITCH_BUILD ?= local
 ROMFS       := $(BUILD)/romfs
 
 APP_TITLE   := OpenCE
@@ -31,7 +33,7 @@ PKG_CONFIG  := $(PORTLIBS)/bin/aarch64-none-elf-pkg-config
 
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 INCLUDE  := -Ihost -Ishim -I../android/include -I../linux/src -I$(LIBNX)/include -I$(PORTLIBS)/include
-CFLAGS   := -g -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -ffunction-sections $(ARCH) -D__SWITCH__ \
+CFLAGS   := -g -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -ffunction-sections $(ARCH) -D__SWITCH__ -DSWITCH_BUILD='"$(SWITCH_BUILD)"' \
             $(INCLUDE) $(shell $(PKG_CONFIG) --cflags sdl2)
 ASFLAGS  := -g $(ARCH)
 LDFLAGS  := -specs=$(LIBNX)/switch.specs -g $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map
@@ -50,7 +52,7 @@ all: $(TARGET).nro
 $(BUILD):
 	@mkdir -p $(BUILD) $(ROMFS)
 
-$(BUILD)/%.o: host/%.c host/switch_host.h | $(BUILD)
+$(BUILD)/%.o: host/%.c host/switch_host.h Makefile | $(BUILD)
 	@echo $(notdir $<)
 	@$(CC) $(CFLAGS) -c $< -o $@
 

@@ -61,7 +61,8 @@ __libnx_exception_entry:
 	stp q28, q29, [sp, #0x280]
 	stp q30, q31, [sp, #0x2a0]
 
-	// w0 = type, x1 = frame
+	// w0 = type, x1 = frame, x2 = the saved x9-x29 (x9 first)
+	mov x2, sp
 	bl switch_exception_handle
 	str w0, [sp, #0x2c0]
 

@@ -35,6 +35,7 @@ calls (switch_files.c, switch_net.c).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -588,6 +589,45 @@ static int open_flags(int flags)
 	return result;
 }
 
+/* descriptors of the game's logs (debug.txt and the like), synced at every
+write so that a crash does not lose their last lines */
+#define SYNCED_COUNT 8
+
+static int synced_fds[SYNCED_COUNT] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+
+static int is_synced(int fd)
+{
+	int index;
+
+	for (index = 0; index < SYNCED_COUNT; index++)
+	{
+		if (synced_fds[index] == fd)
+			return 1;
+	}
+	return 0;
+}
+
+static void set_synced(int fd, int synced)
+{
+	int index;
+
+	for (index = 0; index < SYNCED_COUNT; index++)
+	{
+		if (synced ? synced_fds[index] == -1 : synced_fds[index] == fd)
+		{
+			synced_fds[index] = synced ? fd : -1;
+			return;
+		}
+	}
+}
+
+static int is_log_path(const char *path)
+{
+	size_t length = strlen(path);
+
+	return length >= 4 && !strcasecmp(path + length - 4, ".txt") && !strstr(path, "brokers");
+}
+
 static long guest_openat(int dirfd, const char *guest_path, int flags, int mode)
 {
 	char path[PATH_MAX];
@@ -606,7 +646,13 @@ static long guest_openat(int dirfd, const char *guest_path, int flags, int mode)
 			return -LINUX_ENOTDIR;
 		return directory_open(path);
 	}
-	return result_of(open(path, open_flags(flags), mode));
+	{
+		long fd = result_of(open(path, open_flags(flags), mode));
+
+		if (fd >= 0 && (flags & 3) != 0 && is_log_path(path))
+			set_synced((int)fd, 1);
+		return fd;
+	}
 }
 
 /* pread and pwrite: positioned without moving the descriptor's offset */
@@ -700,11 +746,23 @@ long long host_syscall(long long number, long long a, long long b, long long c,
 			log_bytes((int)a, GUEST(const char *, b), (size_t)(uint32_t)c);
 			return (uint32_t)c;
 		}
-		return result_of(write((int)a, GUEST(const void *, b), (size_t)(uint32_t)c));
+		{
+			long written = result_of(write((int)a, GUEST(const void *, b), (size_t)(uint32_t)c));
+
+			if (written > 0 && is_synced((int)a))
+				fsync((int)a);
+			return written;
+		}
 	case GUEST_SYS_readv:
 		return guest_vector((int)a, (uint64_t)b, (int)c, 0, 0, 0);
 	case GUEST_SYS_writev:
-		return guest_vector((int)a, (uint64_t)b, (int)c, 0, 0, 1);
+	{
+		long written = guest_vector((int)a, (uint64_t)b, (int)c, 0, 0, 1);
+
+		if (written > 0 && is_synced((int)a))
+			fsync((int)a);
+		return written;
+	}
 	case GUEST_SYS_preadv:
 		return guest_vector((int)a, (uint64_t)b, (int)c, d, 1, 0);
 	case GUEST_SYS_pwritev:
@@ -720,6 +778,7 @@ long long host_syscall(long long number, long long a, long long b, long long c,
 			return directory_close((int)a);
 		if (a >= 0 && a <= 2)
 			return 0;
+		set_synced((int)a, 0);
 		return result_of(close((int)a));
 	case GUEST_SYS_lseek:
 		return result_of((long)lseek((int)a, (off_t)b, (int)c));

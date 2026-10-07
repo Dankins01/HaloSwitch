@@ -27,6 +27,7 @@ SD card layout (port/switch/README.md):
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,24 +38,57 @@ SD card layout (port/switch/README.md):
 
 #include "xiso.h"
 
+#ifndef SWITCH_BUILD
+#define SWITCH_BUILD "local"
+#endif
+
+/* the program's load address (libnx's switch.ld) */
+extern char __start__[];
+
 /* ---------- logging and leaving */
 
-static FILE *log_file;
+/* The log is written with write() and synced at every line: the SD card's
+file system keeps written data in its cache until the file is synced, so a
+crash would otherwise lose the lines that say where it happened. */
+static int log_fd = -1;
 static Mutex log_lock;
+static u64 start_tick;
 
-void host_log(int priority, const char *text)
+static void log_write(int priority, const char *text)
 {
 	static const char *const names[] = { "", "", "", "", "info", "warn", "error" };
 	const char *name = priority >= 4 && priority <= 6 ? names[priority] : "";
+	char line[1100];
+	u64 milliseconds = armTicksToNs(armGetSystemTick() - start_tick) / 1000000;
+	int length = snprintf(line, sizeof(line), "%6llu.%03llu [%s] %s\n",
+		(unsigned long long)(milliseconds / 1000), (unsigned long long)(milliseconds % 1000), name, text);
 
+	if (length > (int)sizeof(line) - 1)
+		length = (int)sizeof(line) - 1;
+	if (log_fd >= 0 && length > 0)
+	{
+		write(log_fd, line, (size_t)length);
+		fsync(log_fd);
+	}
+}
+
+void host_log(int priority, const char *text)
+{
 	svcOutputDebugString(text, strlen(text));
 	mutexLock(&log_lock);
-	if (log_file)
-	{
-		fprintf(log_file, "[%s] %s\n", name, text);
-		fflush(log_file);
-	}
+	log_write(priority, text);
 	mutexUnlock(&log_lock);
+}
+
+void host_log_crash(const char *text)
+{
+	/* (the crashed thread may hold the lock: write without it then) */
+	int locked = mutexTryLock(&log_lock);
+
+	svcOutputDebugString(text, strlen(text));
+	log_write(HOST_LOG_ERROR, text);
+	if (locked)
+		mutexUnlock(&log_lock);
 }
 
 void host_logf(int priority, const char *format, ...)
@@ -75,10 +109,10 @@ static void leave(int code)
 {
 	host_logf(HOST_LOG_INFO, "leaving (%d)", code);
 	mutexLock(&log_lock);
-	if (log_file)
+	if (log_fd >= 0)
 	{
-		fclose(log_file);
-		log_file = NULL;
+		close(log_fd);
+		log_fd = -1;
 	}
 	mutexUnlock(&log_lock);
 	svcExitProcess();
@@ -382,6 +416,7 @@ static uint32_t boot_block;
 static void *game_main(void *unused)
 {
 	(void)unused;
+	host_logf(HOST_LOG_INFO, "the game thread runs; entering the game");
 	host_run_guest_main(boot_block);
 }
 
@@ -413,8 +448,10 @@ int main(int argc, char *argv[])
 	mkdir(SWITCH_DATA_ROOT, 0755);
 	mkdir(SWITCH_SAVE_ROOT, 0755);
 	chdir("sdmc:" SWITCH_DATA_ROOT);
-	log_file = fopen(SWITCH_DATA_ROOT "/host.txt", "w");
-	host_logf(HOST_LOG_INFO, "OpenCE for Nintendo Switch starting");
+	start_tick = armGetSystemTick();
+	log_fd = open(SWITCH_DATA_ROOT "/host.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	host_logf(HOST_LOG_INFO, "OpenCE for Nintendo Switch starting (build %s); program at %p",
+		SWITCH_BUILD, (void *)__start__);
 	check_memory();
 
 	if (R_FAILED(socketInitializeDefault()))
@@ -425,6 +462,7 @@ int main(int argc, char *argv[])
 		host_fatal("cannot open the program's own files (romfs)");
 
 	host_prepare_game_data();
+	host_logf(HOST_LOG_INFO, "game data found; loading the game image");
 
 	image = read_whole_file("romfs:/halo_guest.elf", &image_size);
 	if (!image)
@@ -436,6 +474,7 @@ int main(int argc, char *argv[])
 			"see " SWITCH_DATA_ROOT "/host.txt.");
 	}
 	free(image);
+	host_logf(HOST_LOG_INFO, "game image loaded");
 	/* internet play's MQTT brokers (network.brokers_file): written beside
 	config.toml at each start, as the desktop builds ship it */
 	copy_file("romfs:/brokers.txt", SWITCH_DATA_ROOT "/brokers.txt");
@@ -449,9 +488,11 @@ int main(int argc, char *argv[])
 	environment_set(&environment, "HALO_UPDATE_AUTO", "false");
 	time_zone(zone, sizeof(zone));
 	environment_set(&environment, "TZ", zone);
+	host_logf(HOST_LOG_INFO, "making the game's environment");
 	boot_block = make_boot(&environment);
 	host_memory_describe();
 
+	host_logf(HOST_LOG_INFO, "starting the game thread");
 	if (host_native_thread_create(game_main, NULL, MAIN_STACK_SIZE) != 0)
 		host_fatal("cannot start the game thread");
 	/* the game ends the process itself (host_exit); SDL handles the

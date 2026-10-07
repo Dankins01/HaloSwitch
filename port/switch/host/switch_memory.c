@@ -343,6 +343,9 @@ int host_image_map(void *backing, const uint8_t *page_permissions)
 
 		while (page + run < pages && page_permissions[page + run] == permission)
 			run++;
+		host_logf(HOST_LOG_INFO, "  image %08llx-%08llx: %s", (unsigned long long)(image_base + page * PAGE),
+			(unsigned long long)(image_base + (page + run) * PAGE),
+			permission == Perm_Rx ? "code" : permission == Perm_Rw ? "data" : "read only");
 		if (permission != Perm_R &&
 			set_alias_permission(image_base + page * PAGE, run * PAGE, permission) != 0)
 		{

@@ -45,6 +45,8 @@ debug output (svcOutputDebugString, visible with a debugger or nxlink) */
 
 void host_logf(int priority, const char *format, ...) __attribute__((format(printf, 2, 3)));
 void host_log(int priority, const char *text);
+/* the same, from the exception handler (does not wait for the log's lock) */
+void host_log_crash(const char *text);
 /* shows a message in the system's error dialog; 1 if it was shown */
 int host_show_error(const char *message);
 /* logs, shows the message to the player and leaves */

@@ -82,7 +82,7 @@ jobs:
         run: |
           ls -l build/android build/android/host
           set +e
-          make -C port/switch GUEST=../../build/android -j"$(nproc)" 2>&1 | tee build.log
+          make -C port/switch GUEST=../../build/android SWITCH_BUILD="${GITHUB_SHA::7}" -j"$(nproc)" 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             report=$(grep -E -B2 -A3 "error|undefined reference|No such file|Error [0-9]" build.log | head -c 12000 \
@@ -96,3 +96,44 @@ jobs:
           name: opence-switch
           path: port/switch/opence.nro
           retention-days: 14
+
+      # the host's symbols, for reading crash reports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: switch-symbols
+          path: port/switch/build/opence.elf
+          retention-days: 14
+
+  # The build's files on the switch-builds branch (one commit, replaced
+  # each time): the .nro, and the two programs' symbols for reading crash
+  # reports. A branch can be fetched with git where artifacts cannot.
+  publish:
+    needs: [guest, nro]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Push to switch-builds
+        shell: bash
+        run: |
+          mkdir publish
+          cp out/opence.nro out/opence.elf out/halo_guest.elf publish/
+          cd publish
+          for file in opence.elf halo_guest.elf; do
+            # (GitHub refuses files over 100 MB)
+            if [ "$(stat -c %s "$file")" -gt 95000000 ]; then strip --strip-debug "$file" || true; fi
+          done
+          ls -l
+          printf 'Build %s of %s (%s)\n' "${GITHUB_SHA::7}" "$GITHUB_REF_NAME" "$GITHUB_RUN_ID" > BUILD.txt
+          git init -q -b switch-builds
+          git config user.name "switch build"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Switch build ${GITHUB_SHA::7}"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" switch-builds
