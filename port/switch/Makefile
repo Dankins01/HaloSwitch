@@ -28,7 +28,8 @@ APP_TITLE   := OpenCE
 APP_AUTHOR  := OpenCE Switch port
 # (the Homebrew Menu shows it: which build is on the SD card)
 APP_VERSION := 0.1.0-$(SWITCH_BUILD)
-ICON        := $(LIBNX)/default_icon.jpg
+# 256x256 JPEG: replace art/icon.jpg with an image of your own to change it
+ICON        := art/icon.jpg
 
 PKG_CONFIG  := $(PORTLIBS)/bin/aarch64-none-elf-pkg-config
 
@@ -86,7 +87,7 @@ $(BUILD)/$(TARGET).elf: $(OBJECTS)
 $(BUILD)/$(TARGET).nacp: Makefile | $(BUILD)
 	@$(DEVKITPRO)/tools/bin/nacptool --create "$(APP_TITLE)" "$(APP_AUTHOR)" "$(APP_VERSION)" $@
 
-$(TARGET).nro: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).nacp $(ROMFS)/halo_guest.elf $(ROMFS)/brokers.txt
+$(TARGET).nro: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).nacp $(ROMFS)/halo_guest.elf $(ROMFS)/brokers.txt $(ICON)
 	@$(DEVKITPRO)/tools/bin/elf2nro $< $@ --icon=$(ICON) --nacp=$(BUILD)/$(TARGET).nacp --romfsdir=$(ROMFS)
 	@echo built $@
 

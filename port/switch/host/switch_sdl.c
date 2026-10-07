@@ -14,8 +14,12 @@ SDL3 functions report success as true, SDL2's as 0.
 Controllers: the four players' pads, the first also taking the handheld
 Joy-Con, are SDL3 gamepads 1 to 4. Their buttons are reported by
 position, as the game's Xbox layout expects: the bottom face button (B on
-a Switch controller) is SDL3's "south" (Xbox A, jump). ZL and ZR are
-digital, so the triggers read fully pressed or released.
+a Switch controller) is SDL3's "south" (Xbox A, jump). A GameCube
+controller is reported by its own layout instead (its big A jumps).
+Joy-Con and Pro Controller ZL and ZR are switches, so their triggers read
+fully pressed or released; a GameCube controller's triggers are analog.
+Rumble goes to the controller's HD rumble (or a GameCube controller's
+motor), and stops when the game stops asking for it.
 */
 
 #include "switch_host.h"
@@ -104,12 +108,142 @@ static void pads_initialize(void)
 {
 	if (pads_ready)
 		return;
-	padConfigureInput(PAD_COUNT, HidNpadStyleSet_NpadStandard);
+	padConfigureInput(PAD_COUNT, HidNpadStyleSet_NpadStandard | HidNpadStyleTag_NpadGc);
 	padInitialize(&pads[0], HidNpadIdType_No1, HidNpadIdType_Handheld);
 	padInitialize(&pads[1], HidNpadIdType_No2);
 	padInitialize(&pads[2], HidNpadIdType_No3);
 	padInitialize(&pads[3], HidNpadIdType_No4);
 	pads_ready = 1;
+}
+
+/* ---------- rumble
+
+Each controller's vibration devices (two for a Pro Controller, a Joy-Con
+pair or handheld Joy-Con, one for a single Joy-Con or a GameCube
+controller) are set up for the controller id and style it has now, again
+when they change. The game asks for 100 ms of rumble at a time and asks
+again while it lasts (port/linux/src/xinput_sdl.c), so rumble stops when
+its time runs out. */
+
+struct rumble
+{
+	HidNpadIdType id;
+	u32 style;
+	HidVibrationDeviceHandle handles[2];
+	int handle_count;
+	int ready;
+	int active;
+	u64 end_tick;
+};
+
+static struct rumble rumbles[PAD_COUNT];
+
+static HidNpadIdType pad_id(const PadState *pad, int index)
+{
+	int id;
+
+	if (index == 0 && padIsHandheld(pad))
+		return HidNpadIdType_Handheld;
+	for (id = 0; id < 8; id++)
+	{
+		if (pad->active_id_mask & BIT(id))
+			return (HidNpadIdType)id;
+	}
+	return (HidNpadIdType)index;
+}
+
+static u32 pad_style(const PadState *pad)
+{
+	static const u32 order[] = { HidNpadStyleTag_NpadFullKey, HidNpadStyleTag_NpadHandheld,
+		HidNpadStyleTag_NpadJoyDual, HidNpadStyleTag_NpadJoyLeft, HidNpadStyleTag_NpadJoyRight,
+		HidNpadStyleTag_NpadGc };
+	u32 styles = padGetStyleSet(pad);
+	size_t index;
+
+	for (index = 0; index < sizeof(order) / sizeof(order[0]); index++)
+	{
+		if (styles & order[index])
+			return order[index];
+	}
+	return 0;
+}
+
+static int pad_is_gamecube(const PadState *pad)
+{
+	return pad_style(pad) == HidNpadStyleTag_NpadGc;
+}
+
+/* the controller's devices, for its id and style now; 0 if it has none */
+static int rumble_prepare(int index)
+{
+	struct rumble *rumble = &rumbles[index];
+	PadState *pad = &pads[index];
+	HidNpadIdType id = pad_id(pad, index);
+	u32 style = pad_style(pad);
+	Result result;
+
+	if (!style)
+		return 0;
+	if (rumble->ready && rumble->id == id && rumble->style == style)
+		return rumble->handle_count;
+	rumble->ready = 1;
+	rumble->id = id;
+	rumble->style = style;
+	rumble->handle_count = (style & (HidNpadStyleTag_NpadFullKey | HidNpadStyleTag_NpadHandheld |
+		HidNpadStyleTag_NpadJoyDual)) ? 2 : 1;
+	result = hidInitializeVibrationDevices(rumble->handles, rumble->handle_count, id, (HidNpadStyleTag)style);
+	if (R_FAILED(result))
+	{
+		host_logf(HOST_LOG_WARN, "controller %d: no rumble (0x%x)", index + 1, result);
+		rumble->handle_count = 0;
+	}
+	return rumble->handle_count;
+}
+
+static void rumble_send(int index, uint32_t low, uint32_t high)
+{
+	struct rumble *rumble = &rumbles[index];
+	int count = rumble_prepare(index), device;
+
+	if (!count)
+		return;
+	if (rumble->style == HidNpadStyleTag_NpadGc)
+	{
+		/* one motor, on or off */
+		hidSendVibrationGcErmCommand(rumble->handles[0], (low || high) ?
+			HidVibrationGcErmCommand_Start : HidVibrationGcErmCommand_Stop);
+		return;
+	}
+	{
+		HidVibrationValue values[2];
+
+		for (device = 0; device < count; device++)
+		{
+			/* the Xbox's heavy motor as the low band, its light one as the
+			high band, on both sides */
+			values[device].amp_low = (float)low / 65535.0f;
+			values[device].freq_low = 160.0f;
+			values[device].amp_high = (float)high / 65535.0f;
+			values[device].freq_high = 320.0f;
+		}
+		hidSendVibrationValues(rumble->handles, values, count);
+	}
+}
+
+/* stops rumble whose time has run out (pads_update) */
+static void rumble_expire(void)
+{
+	u64 now = armGetSystemTick();
+	int index;
+
+	for (index = 0; index < PAD_COUNT; index++)
+	{
+		if (rumbles[index].active && now >= rumbles[index].end_tick)
+		{
+			rumbles[index].active = 0;
+			rumble_send(index, 0, 0);
+		}
+	}
 }
 
 static void pads_update(void)
@@ -119,6 +253,7 @@ static void pads_update(void)
 	pads_initialize();
 	for (index = 0; index < PAD_COUNT; index++)
 		padUpdate(&pads[index]);
+	rumble_expire();
 }
 
 /* gamepad ids (and handles) are 1 to 4 */
@@ -446,9 +581,22 @@ int host_sdl_gamepad_axis(uint32_t gamepad, int axis)
 		stick = padGetStickPos(pad, 1);
 		return stick.y == -32768 ? 32767 : -stick.y;
 	case S3_GAMEPAD_AXIS_LEFT_TRIGGER:
-		return (buttons & HidNpadButton_ZL) ? 32767 : 0;
 	case S3_GAMEPAD_AXIS_RIGHT_TRIGGER:
-		return (buttons & HidNpadButton_ZR) ? 32767 : 0;
+	{
+		int right = axis == S3_GAMEPAD_AXIS_RIGHT_TRIGGER;
+
+		/* (a GameCube controller's are analog, 0 to 0x7fff, and click at
+		the end of their travel: ZL or ZR then) */
+		if (buttons & (right ? HidNpadButton_ZR : HidNpadButton_ZL))
+			return 32767;
+		if (pad_is_gamecube(pad))
+		{
+			u32 position = padGetGcTriggerPos(pad, right ? 1 : 0);
+
+			return position > 32767 ? 32767 : (int)position;
+		}
+		return 0;
+	}
 	default:
 		return 0;
 	}
@@ -462,6 +610,27 @@ int host_sdl_gamepad_button(uint32_t gamepad, int button)
 	if (!pad)
 		return 0;
 	buttons = padGetButtons(pad);
+	if (pad_is_gamecube(pad))
+	{
+		/* a GameCube controller by its own layout: its big A is the main
+		button (Xbox A, jump), B beside it (Xbox B, melee), X and Y as
+		marked; Z is the right shoulder (Xbox black) */
+		switch (button)
+		{
+		case S3_GAMEPAD_BUTTON_SOUTH: mask = HidNpadButton_A; break;
+		case S3_GAMEPAD_BUTTON_EAST: mask = HidNpadButton_B; break;
+		case S3_GAMEPAD_BUTTON_WEST: mask = HidNpadButton_X; break;
+		case S3_GAMEPAD_BUTTON_NORTH: mask = HidNpadButton_Y; break;
+		case S3_GAMEPAD_BUTTON_START: mask = HidNpadButton_Plus; break;
+		case S3_GAMEPAD_BUTTON_RIGHT_SHOULDER: mask = HidNpadButton_R; break;
+		case S3_GAMEPAD_BUTTON_DPAD_UP: mask = HidNpadButton_Up; break;
+		case S3_GAMEPAD_BUTTON_DPAD_DOWN: mask = HidNpadButton_Down; break;
+		case S3_GAMEPAD_BUTTON_DPAD_LEFT: mask = HidNpadButton_Left; break;
+		case S3_GAMEPAD_BUTTON_DPAD_RIGHT: mask = HidNpadButton_Right; break;
+		default: return 0;
+		}
+		return (buttons & mask) != 0;
+	}
 	switch (button)
 	{
 	/* by position (Xbox A is the bottom button) */
@@ -491,12 +660,22 @@ int host_sdl_gamepad_type(uint32_t gamepad)
 
 int host_sdl_rumble_gamepad(uint32_t gamepad, uint32_t low, uint32_t high, uint32_t milliseconds)
 {
-	/* (no rumble yet) */
-	(void)gamepad;
-	(void)low;
-	(void)high;
-	(void)milliseconds;
-	return 0;
+	int index;
+
+	if (!pad_of(gamepad))
+		return 0;
+	index = (int)gamepad - 1;
+	rumble_send(index, low, high);
+	if (low || high)
+	{
+		rumbles[index].active = 1;
+		rumbles[index].end_tick = armGetSystemTick() + armNsToTicks((u64)milliseconds * 1000000ULL);
+	}
+	else
+	{
+		rumbles[index].active = 0;
+	}
+	return 1;
 }
 
 /* ---------- audio

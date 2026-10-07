@@ -67,6 +67,27 @@ regions where the game's memory must be.
 
 Leaving the game returns to the Home menu.
 
+The Homebrew Menu shows the build as the version (`0.1.0-<build>`), the
+same id as the first line of `host.txt`.
+
+### Icon
+
+The icon is `port/switch/art/icon.jpg`, a 256x256 JPEG. Replace it with an
+image of your own and build again to change it.
+
+### On the Home screen
+
+The Homebrew Menu is the only launcher this project makes. To start the
+game from the Switch's own Home screen, you can make an NSP "forwarder"
+from `opence.nro` yourself, with a tool such as
+[NTON](https://pypi.org/project/nton) (`nton build opence.nro`). It needs
+the `prod.keys` of your own console. A forwarder starts as a full
+application, so the game gets all its memory without holding R. Read the
+tool's warnings first: installing forwarders needs signature patches and
+can get a console banned from online services. The forwarder opens the
+`.nro` at the path it was made for: keep `/switch/opence/opence.nro`
+there. Forwarders are not tested with this port.
+
 For a steady frame rate, set `interpolation = false` under `[display]` in
 `config.toml`. The default draws a blended frame for every 60 Hz refresh,
 and when the Switch cannot keep that up the frame rate jumps between 30,
@@ -93,10 +114,16 @@ controller: the bottom face button (**B**) is Xbox A (jump).
 | + | start | pause menu |
 | − | back | |
 
-ZL and ZR are digital, so the triggers are either fully pressed or not.
+Rumble uses the controller's HD rumble.
 
-Not yet: rumble, a single Joy-Con as a controller, touch, and UPnP for
-internet games (system link on a local network uses the console's Wi-Fi).
+Joy-Con and Pro Controller ZL and ZR are on/off switches, so the triggers
+are either fully pressed or not. A GameCube controller (through an
+adapter the Switch supports) has analog triggers, and the game reads them
+as such. It uses its own layout: A jumps, B melees, X and Y as marked, Z is
+the right shoulder.
+
+Not yet: a single Joy-Con as a controller, touch, and UPnP for internet
+games (system link on a local network uses the console's Wi-Fi).
 
 ## When it stops
 
