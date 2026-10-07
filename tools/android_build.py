@@ -71,8 +71,9 @@ GUEST_ABI_FLAGS = [
     "-DHALO_ANDROID=1",
     # ARMv8.0: nothing the emulator's binary translation or an older
     # device could lack (Darwin targets otherwise assume pointer
-    # authentication and FP16)
-    "-mcpu=cortex-a53",
+    # authentication and FP16). HALO_GUEST_CPU tunes for another ARMv8.0
+    # core: the Switch build's is the Cortex-A57 (port/switch)
+    f"-mcpu={os.environ.get('HALO_GUEST_CPU', 'cortex-a53')}",
     "-nostdinc",
     "-fshort-wchar",
     "-fno-stack-protector",
