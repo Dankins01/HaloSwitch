@@ -26,7 +26,8 @@ ROMFS       := $(BUILD)/romfs
 
 APP_TITLE   := OpenCE
 APP_AUTHOR  := OpenCE Switch port
-APP_VERSION := 0.1.0
+# (the Homebrew Menu shows it: which build is on the SD card)
+APP_VERSION := 0.1.0-$(SWITCH_BUILD)
 ICON        := $(LIBNX)/default_icon.jpg
 
 PKG_CONFIG  := $(PORTLIBS)/bin/aarch64-none-elf-pkg-config
