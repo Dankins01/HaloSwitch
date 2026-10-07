@@ -16,7 +16,8 @@ handle hbloader passes in its environment; Atmosphère's hbloader permits
 all system calls). What the pages may do then follows the kernel's memory
 states (mesosphère, kern_k_page_table_base.cpp):
 
-- an alias starts as AliasCode, readable. svcSetProcessMemoryPermission can
+- an alias starts as AliasCode, mapped for the kernel only (the program
+  cannot even read it until a permission is set). svcSetProcessMemoryPermission can
   make it read-execute (still AliasCode) or read-write, which turns it into
   AliasCodeData for good: that call only accepts AliasCode (FlagCode);
 - AliasCodeData pages can be reprotected with the ordinary
@@ -334,8 +335,11 @@ int host_image_map(void *backing, const uint8_t *page_permissions)
 
 	if (alias(image_base, image_end - image_base, backing) != 0)
 		return -1;
-	/* runs of pages of one permission: read-execute and read-write are
-	set once (read-write ones become data aliases); read stays as it is */
+	/* runs of pages of one permission, each set once (read-write ones
+	become data aliases). Every run is set: a fresh alias is mapped for the
+	kernel only (KernelRead | NotMapped, mesosphère MapCodeMemory), so even
+	read-only pages are not there for the program until they are given
+	Perm_R */
 	while (page < pages)
 	{
 		uint64_t run = 1;
@@ -346,8 +350,7 @@ int host_image_map(void *backing, const uint8_t *page_permissions)
 		host_logf(HOST_LOG_INFO, "  image %08llx-%08llx: %s", (unsigned long long)(image_base + page * PAGE),
 			(unsigned long long)(image_base + (page + run) * PAGE),
 			permission == Perm_Rx ? "code" : permission == Perm_Rw ? "data" : "read only");
-		if (permission != Perm_R &&
-			set_alias_permission(image_base + page * PAGE, run * PAGE, permission) != 0)
+		if (set_alias_permission(image_base + page * PAGE, run * PAGE, permission) != 0)
 		{
 			return -1;
 		}
