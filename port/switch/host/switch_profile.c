@@ -28,6 +28,7 @@ own functions the GL driver's time, or a wait, is for.
 
 #include <switch.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -216,7 +217,7 @@ static void sample(struct profiled_thread *thread, const ThreadContext *context)
 	/* a thread blocked in the kernel stands just past its svc instruction */
 	if ((pc & 3) == 0 && (*(const uint32_t *)(uintptr_t)(pc - 4) & 0xffe0001f) == 0xd4000001)
 	{
-		uint64_t caller = context->lr.x;
+		uint64_t caller = context->lr;
 
 		add(thread, in_host(caller) ? KEY(KIND_WAIT, caller - program) : KEY(KIND_WAIT, 0));
 	}
@@ -227,7 +228,7 @@ static void sample(struct profiled_thread *thread, const ThreadContext *context)
 		add(thread, KEY(KIND_HOST, (pc - program) >> HOST_SHIFT));
 	}
 	{
-		uint64_t caller = game_caller(context->fp.x, context->sp.x);
+		uint64_t caller = game_caller(context->fp, context->sp);
 
 		if (caller)
 			add(thread, KEY(KIND_CALLER, (caller - host_image.base) >> GAME_SHIFT));
