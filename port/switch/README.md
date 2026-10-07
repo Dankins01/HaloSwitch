@@ -107,8 +107,10 @@ times a second it notes where each game thread is, and every 30 seconds
 sampled most (addresses in the game image, to name with
 `llvm-symbolizer --obj=halo_guest.elf`, and offsets into `opence.elf`):
 where it worked, which calls it waited in, and which game functions the
-time in `opence.elf` (the GL driver, mostly) was for. It costs a little
-speed; delete the file to stop it.
+time in `opence.elf` (the GL driver, mostly) was for. The game's main
+thread is also written in full to `/switch/opence/profile.csv`, which
+`tools/switch_profile.py` names and adds up by function with the build's
+symbols. It costs a little speed; delete the file to stop it.
 
 The game's main thread has core 0 to itself; its other threads, audio
 among them, share cores 1 and 2.

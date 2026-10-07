@@ -72,6 +72,8 @@ struct profiled_thread
 	uint64_t samples, busy, busy_game, busy_host;
 	struct entry *table;
 	uint32_t used;
+	/* the game's main thread: also counted for profile.csv */
+	int fine;
 };
 
 static Mutex thread_lock;
@@ -98,6 +100,7 @@ void host_profile_thread_started(Handle thread, const char *name)
 		profiled->number = next_number++;
 		strncpy(profiled->name, name ? name : "thread", sizeof(profiled->name) - 1);
 		profiled->table = table;
+		profiled->fine = name && !strcmp(name, "game");
 		table = NULL;
 	}
 	mutexUnlock(&thread_lock);
@@ -196,10 +199,93 @@ static uint64_t game_caller(uint64_t fp, uint64_t sp)
 	return 0;
 }
 
+static int is_svc(uint64_t address)
+{
+	return (*(const uint32_t *)(uintptr_t)address & 0xffe0001f) == 0xd4000001;
+}
+
+/* ---------- the game thread's whole run, finely, for profile.csv
+
+Every sample of the thread named "game", by its place (16-byte buckets in
+both programs, or a wait by its caller) and the game function it was for
+(its first game frame): written out with every report, to be read with the
+symbols of the build (tools/switch_profile.py) */
+
+#define FINE_SIZE 65536
+#define FINE_FILE SWITCH_DATA_ROOT "/profile.csv"
+
+struct fine_entry
+{
+	uint64_t where;
+	uint32_t caller;
+	uint32_t count;
+};
+
+static struct fine_entry *fine;
+static uint32_t fine_used;
+static uint64_t fine_samples, fine_lost;
+
+static void fine_add(uint64_t where, uint32_t caller)
+{
+	uint64_t mixed = where * 0x9e3779b97f4a7c15ULL ^ (uint64_t)caller * 0xc2b2ae3d27d4eb4fULL;
+	uint32_t slot = (uint32_t)(mixed >> 48) & (FINE_SIZE - 1);
+
+	fine_samples++;
+	for (;;)
+	{
+		struct fine_entry *entry = &fine[slot];
+
+		if (entry->count && entry->where == where && entry->caller == caller)
+		{
+			entry->count++;
+			return;
+		}
+		if (!entry->count)
+		{
+			if (fine_used >= FINE_SIZE * 7 / 8)
+			{
+				fine_lost++;
+				return;
+			}
+			entry->where = where;
+			entry->caller = caller;
+			entry->count = 1;
+			fine_used++;
+			return;
+		}
+		slot = (slot + 1) & (FINE_SIZE - 1);
+	}
+}
+
+static void fine_write(void)
+{
+	FILE *file;
+	uint32_t index;
+
+	if (!fine || !fine_samples || !(file = fopen(FINE_FILE, "w")))
+		return;
+	fprintf(file, "# build %s, game image %08x, %llu samples, %llu not counted by place\n", SWITCH_BUILD,
+		(unsigned)host_image.base, (unsigned long long)fine_samples, (unsigned long long)fine_lost);
+	fprintf(file, "kind,address,caller,count\n");
+	for (index = 0; index < FINE_SIZE; index++)
+	{
+		const struct fine_entry *entry = &fine[index];
+
+		if (!entry->count)
+			continue;
+		fprintf(file, "%c,%llx,%x,%u\n", (int)(entry->where >> 56), (unsigned long long)(entry->where & ((1ULL << 56) - 1)),
+			(unsigned)entry->caller, (unsigned)entry->count);
+	}
+	fclose(file);
+}
+
 static void sample(struct profiled_thread *thread, const ThreadContext *context)
 {
 	uint64_t pc = context->pc.x;
 	uint64_t program = host_program_base();
+	uint64_t where;
+
+	int fine_thread = fine && thread->fine;
 
 	thread->samples++;
 	if (in_game(pc))
@@ -207,24 +293,32 @@ static void sample(struct profiled_thread *thread, const ThreadContext *context)
 		thread->busy++;
 		thread->busy_game++;
 		add(thread, KEY(KIND_GAME, (pc - host_image.base) >> GAME_SHIFT));
+		if (fine_thread)
+			fine_add(((uint64_t)'g' << 56) | (pc & ~15ULL), 0);
 		return;
 	}
 	if (!in_host(pc))
 	{
 		thread->busy++;
+		if (fine_thread)
+			fine_add((uint64_t)'o' << 56, 0);
 		return;
 	}
-	/* a thread blocked in the kernel stands just past its svc instruction */
-	if ((pc & 3) == 0 && (*(const uint32_t *)(uintptr_t)(pc - 4) & 0xffe0001f) == 0xd4000001)
+	/* a thread blocked in the kernel: its pc is at the svc instruction
+	(Horizon reports that, not the instruction after it, as the first
+	profile showed), or just past it */
+	if ((pc & 3) == 0 && (is_svc(pc) || is_svc(pc - 4)))
 	{
 		uint64_t caller = context->lr;
 
+		where = in_host(caller) ? ((uint64_t)'w' << 56) | (caller - program) : (uint64_t)'w' << 56;
 		add(thread, in_host(caller) ? KEY(KIND_WAIT, caller - program) : KEY(KIND_WAIT, 0));
 	}
 	else
 	{
 		thread->busy++;
 		thread->busy_host++;
+		where = ((uint64_t)'h' << 56) | ((pc - program) & ~15ULL);
 		add(thread, KEY(KIND_HOST, (pc - program) >> HOST_SHIFT));
 	}
 	{
@@ -232,6 +326,8 @@ static void sample(struct profiled_thread *thread, const ThreadContext *context)
 
 		if (caller)
 			add(thread, KEY(KIND_CALLER, (caller - host_image.base) >> GAME_SHIFT));
+		if (fine_thread)
+			fine_add(where, (uint32_t)caller);
 	}
 }
 
@@ -340,6 +436,7 @@ static void report(void)
 	host_logf(HOST_LOG_INFO, "profile: the last %d s, %d threads", REPORT_SECONDS, thread_count);
 	for (index = 0; index < thread_count; index++)
 		report_thread(&threads[index]);
+	fine_write();
 }
 
 /* ---------- sampling */
@@ -382,6 +479,7 @@ void host_profile_start(void)
 	if (stat(PROFILE_FILE, &information) != 0 || !host_image.header)
 		return;
 	mutexInit(&thread_lock);
+	fine = calloc(FINE_SIZE, sizeof(*fine));
 	profiling = 1;
 	/* above the game's threads (0x3b), so it runs when they are busy */
 	if (R_FAILED(threadCreate(&thread, sampler, NULL, NULL, 0x8000, 0x2a, -2)) || R_FAILED(threadStart(&thread)))

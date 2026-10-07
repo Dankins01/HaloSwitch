@@ -451,6 +451,8 @@ vertices. */
 #define INDEX_BUFFER_SIZE (8 * 1024 * 1024)
 #endif
 #define VISIBILITY_TEST_SLOTS 4096
+/* (a counter is used again this many tests later) */
+#define VISIBILITY_COUNTERS 256
 #ifdef HALO_ANDROID
 #define VISIBILITY_QUERY GL_ANY_SAMPLES_PASSED
 #define VISIBILITY_ALL_SAMPLES 1000000
@@ -517,8 +519,12 @@ struct gl_device
 	BOOL visibility_test_active;
 #ifdef HALO_ANDROID
 	/* with atomic counters: one counter per test, used as a ring; the
-	counter a test ended in, per result slot */
-	GLuint visibility_counters;
+	counter a test ended in, per result slot. Each counter is a buffer of
+	its own: reading one waits for the GPU to finish that test's draws,
+	where in one buffer for all it waited for the latest test's: for the
+	GPU's whole queue (the Switch's profile put up to a sixth of the game
+	thread's time there) */
+	GLuint visibility_counters[VISIBILITY_COUNTERS];
 	unsigned long counter_next;
 	unsigned long counter_active;
 	unsigned long counter_of_slot[VISIBILITY_TEST_SLOTS];
@@ -1447,9 +1453,12 @@ static void gl_initialize(void)
 #ifdef HALO_ANDROID
 	if (xgpu_capabilities.atomic_counters)
 	{
-		glGenBuffers(1, &device.visibility_counters);
-		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, device.visibility_counters);
-		glBufferData(GL_ATOMIC_COUNTER_BUFFER, VISIBILITY_TEST_SLOTS * sizeof(GLuint), NULL, GL_DYNAMIC_DRAW);
+		glGenBuffers(VISIBILITY_COUNTERS, device.visibility_counters);
+		for (index = 0; index < VISIBILITY_COUNTERS; index++)
+		{
+			glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, device.visibility_counters[index]);
+			glBufferData(GL_ATOMIC_COUNTER_BUFFER, sizeof(GLuint), NULL, GL_DYNAMIC_DRAW);
+		}
 		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
 	}
 #endif
@@ -1914,11 +1923,10 @@ void WINAPI D3DDevice_BeginVisibilityTest(void)
 	{
 		const GLuint zero = 0;
 
-		device.counter_next = (device.counter_next + 1) % VISIBILITY_TEST_SLOTS;
+		device.counter_next = (device.counter_next + 1) % VISIBILITY_COUNTERS;
 		device.counter_active = device.counter_next;
-		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, device.visibility_counters);
-		host_gl_buffer_write(GL_ATOMIC_COUNTER_BUFFER, (unsigned int)(device.counter_active * sizeof(GLuint)),
-			sizeof(zero), &zero);
+		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, device.visibility_counters[device.counter_active]);
+		host_gl_buffer_write(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof(zero), &zero);
 		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
 		return;
 	}
@@ -1998,8 +2006,7 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
 	if (xgpu_capabilities.atomic_counters)
 	{
 		/* reading the buffer waits for the draws that counted */
-		samples = host_gl_read_buffer_word(device.visibility_counters,
-			(unsigned int)(device.counter_of_slot[index] * sizeof(GLuint)));
+		samples = host_gl_read_buffer_word(device.visibility_counters[device.counter_of_slot[index]], 0);
 		if (result)
 			*result = samples;
 		return S_OK;
@@ -3199,8 +3206,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
 	state_program(entry->program);
 #ifdef HALO_ANDROID
 	if (key.count_samples)
-		glBindBufferRange(GL_ATOMIC_COUNTER_BUFFER, 0, device.visibility_counters,
-			(GLintptr)(device.counter_active * sizeof(GLuint)), sizeof(GLuint));
+		glBindBufferRange(GL_ATOMIC_COUNTER_BUFFER, 0, device.visibility_counters[device.counter_active], 0,
+			sizeof(GLuint));
 #endif
 
 	if (entry->constants >= 0 && entry->constants_serial != constants_serial)
