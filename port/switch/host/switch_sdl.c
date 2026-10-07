@@ -169,7 +169,15 @@ static void check_connections(void)
 
 /* ---------- general */
 
-static int audio_frames = 1024;
+/* frames per audio callback: at least AUDIO_MINIMUM_FRAMES whatever the
+game asks (512, 11 ms). Each callback passes between two threads here
+(audio_callback, audio_thread), and at 11 ms one late handoff while the
+game draws is a gap in the sound, heard as crackling. */
+#define AUDIO_MINIMUM_FRAMES 2048
+/* above the game's threads (0x2c; a lower number runs first) */
+#define AUDIO_THREAD_PRIORITY 0x28
+
+static int audio_frames = AUDIO_MINIMUM_FRAMES;
 
 int host_sdl_init(uint32_t flags)
 {
@@ -196,7 +204,7 @@ int host_sdl_set_hint(const char *name, const char *value)
 		int frames = atoi(value);
 
 		if (frames >= 64 && frames <= 16384)
-			audio_frames = frames;
+			audio_frames = frames < AUDIO_MINIMUM_FRAMES ? AUDIO_MINIMUM_FRAMES : frames;
 		return 1;
 	}
 	return SDL_SetHint(name, value) ? 1 : 0;
@@ -540,6 +548,7 @@ static void *audio_thread(void *context)
 {
 	struct audio_binding *binding = context;
 
+	svcSetThreadPriority(CUR_THREAD_HANDLE, AUDIO_THREAD_PRIORITY);
 	mutexLock(&binding->lock);
 	for (;;)
 	{
@@ -561,8 +570,15 @@ static void *audio_thread(void *context)
 static void SDLCALL audio_callback(void *userdata, Uint8 *stream, int length)
 {
 	struct audio_binding *binding = userdata;
+	static int raised;
 	int taken;
 
+	/* SDL's own audio thread, likewise above the game's */
+	if (!raised)
+	{
+		raised = 1;
+		svcSetThreadPriority(CUR_THREAD_HANDLE, AUDIO_THREAD_PRIORITY);
+	}
 	mutexLock(&binding->lock);
 	if (binding->buffer_length < length)
 	{

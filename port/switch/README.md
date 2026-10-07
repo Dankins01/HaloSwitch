@@ -67,6 +67,11 @@ regions where the game's memory must be.
 
 Leaving the game returns to the Home menu.
 
+For a steady frame rate, set `interpolation = false` under `[display]` in
+`config.toml`. The default draws a blended frame for every 60 Hz refresh,
+and when the Switch cannot keep that up the frame rate jumps between 30,
+20 and 15. Off, the game draws its original 30 frames a second.
+
 ## Controls
 
 Pro Controller, or both Joy-Con (attached to the console or in a grip);
