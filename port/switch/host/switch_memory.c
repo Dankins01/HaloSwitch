@@ -351,6 +351,7 @@ int host_image_map(void *backing, const uint8_t *page_permissions)
 		{
 			return -1;
 		}
+		host_logf(HOST_LOG_INFO, "    done");
 		page += run;
 	}
 	return 0;

@@ -42,8 +42,17 @@ SD card layout (port/switch/README.md):
 #define SWITCH_BUILD "local"
 #endif
 
-/* the program's load address (libnx's switch.ld) */
-extern char __start__[];
+
+uint64_t host_program_base(void)
+{
+	static uint64_t base;
+	MemoryInfo information;
+	u32 page_information;
+
+	if (!base && R_SUCCEEDED(svcQueryMemory(&information, &page_information, (u64)(uintptr_t)host_program_base)))
+		base = information.addr;
+	return base;
+}
 
 /* ---------- logging and leaving */
 
@@ -451,7 +460,7 @@ int main(int argc, char *argv[])
 	start_tick = armGetSystemTick();
 	log_fd = open(SWITCH_DATA_ROOT "/host.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	host_logf(HOST_LOG_INFO, "OpenCE for Nintendo Switch starting (build %s); program at %p",
-		SWITCH_BUILD, (void *)__start__);
+		SWITCH_BUILD, (void *)(uintptr_t)host_program_base());
 	check_memory();
 
 	if (R_FAILED(socketInitializeDefault()))

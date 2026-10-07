@@ -17,19 +17,23 @@
 // (a watched page made writeable), anything else to have the process
 // terminated with a crash report (Atmosphère writes it to the SD card).
 //
-// The stack pointer at entry is the faulting thread's. Guest code is
-// compiled for the Apple arm64 ABI (arm64_32-apple-watchos), which lets a
-// function keep 128 bytes below its stack pointer, so this starts further
-// down. The kernel restores the thread's stack pointer from the frame.
+// The stack pointer at entry is not the thread's: the kernel points it at
+// the top of a 0x148-byte scratch area in the process local region
+// (mesosphère, kern_exception_handlers.cpp), and restores the thread's from
+// the frame on return. So this first moves to a stack of its own, as libnx's
+// handler does. One stack serves all threads: the kernel lets one thread at
+// a time into the handler. x0-x8 are free to use here: the kernel restores
+// them from the frame.
 
 	.section .text.__libnx_exception_entry, "ax", %progbits
 	.global __libnx_exception_entry
 	.type __libnx_exception_entry, %function
 	.align 2
 __libnx_exception_entry:
+	adrp x2, switch_exception_stack_top
+	add x2, x2, #:lo12:switch_exception_stack_top
+	mov sp, x2
 	sub sp, sp, #0x400
-	// sp may not be 16-byte aligned if the fault was a misaligned stack;
-	// such a fault is not handled anyway, and stores below work regardless
 	stp x9, x10, [sp, #0x000]
 	stp x11, x12, [sp, #0x010]
 	stp x13, x14, [sp, #0x020]
@@ -120,3 +124,11 @@ switch_call_on_stack:
 	ldr x19, [sp, #16]
 	ldp x29, x30, [sp], #32
 	ret
+
+// the handler's stack (64 KB: the crash report formats text on it)
+	.section .bss.switch_exception_stack, "aw", %nobits
+	.align 4
+switch_exception_stack:
+	.space 0x10000
+	.global switch_exception_stack_top
+switch_exception_stack_top:

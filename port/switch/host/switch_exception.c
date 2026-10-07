@@ -28,12 +28,9 @@ fault status code */
 
 static volatile int crashing;
 
-/* the program's load address (libnx's switch.ld) */
-extern char __start__[];
-
 static void where(char *buffer, size_t size, uint64_t address)
 {
-	uint64_t program = (uint64_t)(uintptr_t)__start__;
+	uint64_t program = host_program_base();
 
 	if (host_image.header && address >= host_image.base && address < host_image.end)
 		snprintf(buffer, size, "%016llx (game image)", (unsigned long long)address);

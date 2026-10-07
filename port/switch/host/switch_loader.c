@@ -178,7 +178,9 @@ int host_load_image(const void *file, size_t size)
 		host_logf(HOST_LOG_ERROR, "cannot map the guest image");
 		return -1;
 	}
+	host_logf(HOST_LOG_INFO, "guest image aliased");
 	free(permissions);
+	host_logf(HOST_LOG_INFO, "invalidating the instruction cache");
 	armICacheInvalidate((void *)(uintptr_t)low, high - low);
 	host_logf(HOST_LOG_INFO, "guest image mapped");
 

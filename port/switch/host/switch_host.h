@@ -55,6 +55,9 @@ void host_exit(int code) __attribute__((noreturn));
 void host_abort(const char *reason) __attribute__((noreturn));
 int host_errno(void);
 
+/* the address opence.elf was loaded at (its code's first page) */
+uint64_t host_program_base(void);
+
 /* where the game's files live (switch_main.c) */
 #define SWITCH_DATA_ROOT "/switch/opence"
 #define SWITCH_SAVE_ROOT "/switch/opence/save"
