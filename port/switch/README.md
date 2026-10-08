@@ -92,7 +92,8 @@ there. Forwarders are not tested with this port.
 
 Create an empty file `/switch/opence/boost.txt` to run the CPU at 1785 MHz
 (the rate of Nintendo's own CPU boost mode) and the GPU at the top of
-Nintendo's normal range (460.8 MHz handheld, 768 MHz docked). It uses more
+Nintendo's normal range (460.8 MHz handheld, 768 MHz docked), with the
+memory at 1600 MHz (Nintendo's docked rate). It uses more
 battery and runs warmer. The original clocks come back when the game ends;
 after a crash, the next program you start resets them. `host.txt` logs the
 clocks at start-up and on docking.

@@ -444,17 +444,20 @@ void host_note_frame(uint64_t swap_started)
 The clocks are read at start-up and when the console is docked or
 undocked. With /switch/opence/boost.txt present, the CPU runs at 1785 MHz
 (the rate of Nintendo's own CPU boost mode) and the GPU at the top of
-Nintendo's normal range for the mode (460.8 MHz handheld, 768 MHz docked);
-the clocks the game started with come back when it ends. */
+Nintendo's normal range for the mode (460.8 MHz handheld, 768 MHz docked)
+and the memory at 1600 MHz (the docked rate, which the console also gave
+the game in handheld mode on some starts and 1331 MHz on others); the
+clocks the game started with come back when it ends. */
 
 #define BOOST_FILE SWITCH_DATA_ROOT "/boost.txt"
 #define BOOST_CPU_HZ 1785000000u
 #define BOOST_GPU_HANDHELD_HZ 460800000u
 #define BOOST_GPU_DOCKED_HZ 768000000u
+#define BOOST_MEMORY_HZ 1600000000u
 
 static ClkrstSession cpu_clock, gpu_clock, memory_clock;
 static int clocks_open, boosting;
-static u32 original_cpu_hz, original_gpu_hz;
+static u32 original_cpu_hz, original_gpu_hz, original_memory_hz;
 
 static void clocks_open_sessions(void)
 {
@@ -489,12 +492,14 @@ static void clocks_apply(void)
 	{
 		clkrstGetClockRate(&cpu_clock, &original_cpu_hz);
 		clkrstGetClockRate(&gpu_clock, &original_gpu_hz);
+		clkrstGetClockRate(&memory_clock, &original_memory_hz);
 		boosting = 1;
 	}
 	if (boosting)
 	{
 		clkrstSetClockRate(&cpu_clock, BOOST_CPU_HZ);
 		clkrstSetClockRate(&gpu_clock, docked ? BOOST_GPU_DOCKED_HZ : BOOST_GPU_HANDHELD_HZ);
+		clkrstSetClockRate(&memory_clock, BOOST_MEMORY_HZ);
 	}
 	clkrstGetClockRate(&cpu_clock, &cpu);
 	clkrstGetClockRate(&gpu_clock, &gpu);
@@ -509,6 +514,7 @@ static void clocks_restore(void)
 	{
 		clkrstSetClockRate(&cpu_clock, original_cpu_hz);
 		clkrstSetClockRate(&gpu_clock, original_gpu_hz);
+		clkrstSetClockRate(&memory_clock, original_memory_hz);
 	}
 }
 
