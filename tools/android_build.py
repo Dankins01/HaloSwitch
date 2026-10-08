@@ -132,6 +132,8 @@ MUSL_EXCLUDE = {
     "env/__reset_tls.c", "malloc/oldmalloc", "thread/pthread_create.c",
     # unused, and its compiler barrier is an inline assembly statement
     "string/explicit_bzero.c",
+    # a word at a time instead (guest_string.c)
+    "string/memcmp.c",
 }
 # game files that call variadic functions without a prototype in scope, which
 # only works under x86's calling convention (tools/android_abi_check.py)
@@ -484,7 +486,7 @@ def generate_android_build(n: Writer, sln: Any) -> None:
     ])
     runtime_dir = PORT_DIR / "guest" / "runtime"
     for source in sorted(runtime_dir.glob("*.c")):
-        if source.name in ("guest_thread.c", "guest_start.c"):
+        if source.name in ("guest_thread.c", "guest_start.c", "guest_string.c"):
             objects.append(guest_object(source, runtime_internal_cflags))
         elif source.name == "guest_memory_watch.c":
             objects.append(guest_object(source, platform_cflags))
