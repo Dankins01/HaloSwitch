@@ -1,0 +1,50 @@
+name: devkitPro toolchain snapshot
+
+# Packages the public devkitPro Switch toolchain (devkitA64, libnx, switch-mesa and
+# the switch tools) as a release asset, so a build machine without access to
+# devkitPro's package servers can unpack it into /opt/devkitpro.
+# Contains no game code or data.
+on:
+  push:
+    branches: [devkitpro-toolchain]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    container: devkitpro/devkita64:latest
+    timeout-minutes: 40
+    steps:
+      - name: Install Switch libraries
+        run: |
+          dkp-pacman -Sy --noconfirm || true
+          dkp-pacman -S --noconfirm --needed switch-dev switch-mesa switch-libdrm_nouveau switch-glad || \
+            dkp-pacman -S --noconfirm --needed switch-dev switch-mesa
+          ls /opt/devkitpro /opt/devkitpro/portlibs/switch/lib | head -80
+          du -sh /opt/devkitpro/*
+      - name: Package
+        run: |
+          cd /opt
+          tar --exclude='devkitpro/pacman' -cf - devkitpro | xz -T0 -6 > /tmp/devkitpro-switch.tar.xz
+          ls -la /tmp/devkitpro-switch.tar.xz
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apt-get update -qq && apt-get install -y -qq curl ca-certificates jq >/dev/null
+          repo="${{ github.repository }}"
+          tag=devkitpro-toolchain-snapshot
+          api=https://api.github.com/repos/$repo
+          old=$(curl -s -H "Authorization: Bearer $GH_TOKEN" $api/releases/tags/$tag | jq -r .id)
+          if [ "$old" != "null" ] && [ -n "$old" ]; then
+            curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" $api/releases/$old
+          fi
+          id=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" $api/releases \
+               -d "{\"tag_name\":\"$tag\",\"target_commitish\":\"${{ github.sha }}\",\"name\":\"devkitPro Switch toolchain snapshot\",\"prerelease\":true,\"body\":\"Public devkitPro toolchain packaged for an offline build machine. No game content.\"}" | jq -r .id)
+          echo "release $id"
+          curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/x-xz" \
+               --data-binary @/tmp/devkitpro-switch.tar.xz \
+               "https://uploads.github.com/repos/$repo/releases/$id/assets?name=devkitpro-switch.tar.xz" | jq -r '.browser_download_url, .size'
