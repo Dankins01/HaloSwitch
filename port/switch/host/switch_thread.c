@@ -146,6 +146,13 @@ struct thread_start
 	struct thread_start *next_finished;
 };
 
+static Handle game_thread;
+
+Handle host_game_thread(void)
+{
+	return game_thread;
+}
+
 static Mutex reaper_lock;
 static CondVar reaper_condition;
 static struct thread_start *finished_threads;
@@ -237,6 +244,8 @@ int host_native_thread_create(void *(*function)(void *), void *argument, size_t 
 	if (R_SUCCEEDED(result))
 	{
 		host_profile_thread_started(start->thread.handle, name);
+		if (name && !strcmp(name, "game"))
+			game_thread = start->thread.handle;
 		result = threadStart(&start->thread);
 		if (R_FAILED(result))
 			host_profile_thread_ended(start->thread.handle);

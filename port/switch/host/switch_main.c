@@ -545,9 +545,19 @@ static void watchdog(void *unused)
 			continue;
 		if (now - last > 3 * frequency)
 		{
+			uint64_t seconds = (now - last) / frequency;
+
 			if (!stalled)
 				host_logf(HOST_LOG_WARN, "no frame drawn for %llu s (%llu so far): the game is stalled",
-					(unsigned long long)((now - last) / frequency), (unsigned long long)frames);
+					(unsigned long long)seconds, (unsigned long long)frames);
+			/* where its main thread is, at once and every 5 s after (a level
+			loading shows its loading; a hang, where it hangs) */
+			if ((!stalled || seconds % 5 == 3) && host_game_thread())
+			{
+				if (stalled)
+					host_logf(HOST_LOG_WARN, "still no frame after %llu s", (unsigned long long)seconds);
+				host_report_thread(host_game_thread(), "game");
+			}
 			stalled = 1;
 		}
 		else if (stalled)

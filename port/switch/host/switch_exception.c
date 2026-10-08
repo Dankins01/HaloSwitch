@@ -91,6 +91,48 @@ static void report(uint32_t type, const ThreadExceptionFrameA64 *frame, const ui
 	}
 }
 
+/* a stalled thread's whereabouts (the watchdog's, switch_main.c): paused,
+its registers read and its frame records followed on its stack, as far as
+the stack's memory goes */
+void host_report_thread(Handle thread, const char *name)
+{
+	ThreadContext context;
+	MemoryInfo information;
+	u32 page_information;
+	char line[160], pc[64], lr[64];
+	uint64_t fp, end = 0;
+	int index;
+
+	if (R_FAILED(svcSetThreadActivity(thread, ThreadActivity_Paused)))
+		return;
+	if (R_FAILED(svcGetThreadContext3(&context, thread)))
+	{
+		svcSetThreadActivity(thread, ThreadActivity_Runnable);
+		return;
+	}
+	where(pc, sizeof(pc), context.pc.x);
+	where(lr, sizeof(lr), context.lr);
+	snprintf(line, sizeof(line), "  %s thread: pc %s", name, pc);
+	host_log(HOST_LOG_WARN, line);
+	snprintf(line, sizeof(line), "  lr %s, sp %016llx", lr, (unsigned long long)context.sp);
+	host_log(HOST_LOG_WARN, line);
+	if (R_SUCCEEDED(svcQueryMemory(&information, &page_information, context.sp)) && (information.perm & Perm_R))
+		end = information.addr + information.size;
+	fp = context.fp;
+	for (index = 0; index < 32 && fp >= context.sp && fp + 16 <= end && !(fp & 7); index++)
+	{
+		const uint64_t *record = (const uint64_t *)(uintptr_t)fp;
+
+		where(lr, sizeof(lr), record[1]);
+		snprintf(line, sizeof(line), "  frame %2d: %s", index, lr);
+		host_log(HOST_LOG_WARN, line);
+		if (record[0] <= fp)
+			break;
+		fp = record[0];
+	}
+	svcSetThreadActivity(thread, ThreadActivity_Runnable);
+}
+
 uint32_t switch_exception_handle(uint32_t type, ThreadExceptionFrameA64 *frame, const uint64_t *saved)
 {
 	uint32_t esr = frame->esr;

@@ -123,6 +123,10 @@ int host_native_thread_create(void *(*function)(void *), void *argument, size_t 
 void host_run_guest_main(uint32_t boot) __attribute__((noreturn));
 /* moves the calling thread (one libnx or SDL made) off the game's core */
 void host_thread_leave_game_core(void);
+/* the game's main thread (switch_thread.c), 0 before it starts */
+Handle host_game_thread(void);
+/* logs where a thread is and its frame records (switch_exception.c) */
+void host_report_thread(Handle thread, const char *name);
 /* a small number for this thread (gettid) */
 int host_thread_number(void);
 
