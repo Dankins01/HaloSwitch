@@ -528,6 +528,10 @@ struct gl_device
 	unsigned long counter_next;
 	unsigned long counter_active;
 	unsigned long counter_of_slot[VISIBILITY_TEST_SLOTS];
+	/* the counter of the slot's test before (the last frame's): the result
+	given, so that reading it does not wait for the GPU */
+	unsigned long earlier_counter_of_slot[VISIBILITY_TEST_SLOTS];
+	BOOL earlier_counter_valid[VISIBILITY_TEST_SLOTS];
 #else
 	/* each test's latest result, which the GPU writes (as a query buffer)
 	when the test's draws are done: the game waits for results at the start
@@ -1947,6 +1951,11 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
 #ifdef HALO_ANDROID
 	if (xgpu_capabilities.atomic_counters)
 	{
+		if (device.query_pending[index])
+		{
+			device.earlier_counter_of_slot[index] = device.counter_of_slot[index];
+			device.earlier_counter_valid[index] = TRUE;
+		}
 		device.counter_of_slot[index] = device.counter_active;
 		device.query_pending[index] = TRUE;
 		return S_OK;
@@ -2005,8 +2014,14 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
 #ifdef HALO_ANDROID
 	if (xgpu_capabilities.atomic_counters)
 	{
-		/* reading the buffer waits for the draws that counted */
-		samples = host_gl_read_buffer_word(device.visibility_counters[device.counter_of_slot[index]], 0);
+		/* reading a counter waits for the draws that counted, and the game
+		asks for a test's result right after it (mesa spins until the GPU
+		is there: a sixth of the Switch's game thread on the menu). So the
+		result is the slot's test before, a frame old, whose draws the GPU
+		has done: lens flares fade in or out a frame later than the Xbox's.
+		A slot's first test waits. */
+		samples = host_gl_read_buffer_word(device.visibility_counters[device.earlier_counter_valid[index] ?
+			device.earlier_counter_of_slot[index] : device.counter_of_slot[index]], 0);
 		if (result)
 			*result = samples;
 		return S_OK;
