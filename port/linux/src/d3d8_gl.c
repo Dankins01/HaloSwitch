@@ -995,6 +995,296 @@ GLuint xgpu_link_program(GLuint vertex_shader, GLuint fragment_shader, const cha
 	return program;
 }
 
+/* ---------- the shader cache
+
+The game's shaders are made as its draws first need them: a GLSL program
+for each pair of a vertex shader and a pixel shader state, compiled and
+linked in the middle of a frame. On the Switch that is a stutter wherever
+something new comes into view (mesa compiles slowly on its CPU). So every
+pair linked is written to <data>/shader_cache.bin, their sources and
+which go together, and when the game starts the next time all of them are
+compiled and linked before the first frame, and drawn once (with nothing
+rasterized) so that the driver also translates them to the GPU's code:
+the draws that need them later find them made.
+
+Records, one after another: "S <type> <hash> <length>\n" and the source,
+then "\n"; "P <vertex hash> <pixel hash>\n". A source is known by its
+hash (64-bit FNV-1a), so a shader whose source changed between builds is
+simply made again and recorded anew. */
+
+#define SHADER_CACHE_SLOTS 16384
+#define SHADER_CACHE_LIMIT (16 * 1024 * 1024)
+
+struct cached_shader
+{
+	unsigned long long hash;
+	GLuint shader;
+	BOOL recorded;
+};
+
+struct cached_program
+{
+	GLuint vertex_shader, fragment_shader;
+	GLuint program;
+	BOOL recorded;
+};
+
+static struct
+{
+	BOOL enabled;
+	struct cached_shader *shaders;
+	struct cached_program *programs;
+	FILE *file;
+	long size;
+} shader_cache;
+
+static unsigned long long source_hash(const char *source)
+{
+	unsigned long long hash = 14695981039346656037ULL;
+
+	for (; *source; source++)
+		hash = (hash ^ (unsigned char)*source) * 1099511628211ULL;
+	return hash ? hash : 1;
+}
+
+static struct cached_shader *cached_shader_slot(unsigned long long hash)
+{
+	unsigned long index = (unsigned long)(hash ^ (hash >> 29)) % SHADER_CACHE_SLOTS, probes;
+
+	for (probes = 0; probes < SHADER_CACHE_SLOTS; probes++)
+	{
+		struct cached_shader *slot = &shader_cache.shaders[index];
+
+		if (!slot->hash || slot->hash == hash)
+			return slot;
+		index = (index + 1) % SHADER_CACHE_SLOTS;
+	}
+	return NULL;
+}
+
+/* the slot of the shader with that GL name; NULL if none */
+static struct cached_shader *cached_shader_named(GLuint shader)
+{
+	unsigned long index;
+
+	for (index = 0; index < SHADER_CACHE_SLOTS; index++)
+	{
+		if (shader_cache.shaders[index].hash && shader_cache.shaders[index].shader == shader)
+			return &shader_cache.shaders[index];
+	}
+	return NULL;
+}
+
+static struct cached_program *cached_program_slot(GLuint vertex_shader, GLuint fragment_shader)
+{
+	unsigned long index = (vertex_shader * 2654435761UL ^ fragment_shader * 40503UL) % SHADER_CACHE_SLOTS, probes;
+
+	for (probes = 0; probes < SHADER_CACHE_SLOTS; probes++)
+	{
+		struct cached_program *slot = &shader_cache.programs[index];
+
+		if (!slot->vertex_shader || (slot->vertex_shader == vertex_shader && slot->fragment_shader == fragment_shader))
+			return slot;
+		index = (index + 1) % SHADER_CACHE_SLOTS;
+	}
+	return NULL;
+}
+
+/* the shader for a source: made already (earlier, or from the cache), or
+compiled now */
+static GLuint cached_compile_shader(GLenum type, const char *source, const char *what)
+{
+	unsigned long long hash;
+	struct cached_shader *slot;
+
+	if (!shader_cache.enabled)
+		return xgpu_compile_shader(type, source, what);
+	hash = source_hash(source);
+	slot = cached_shader_slot(hash);
+	if (slot && slot->hash && slot->shader)
+		return slot->shader;
+	if (!slot)
+		return xgpu_compile_shader(type, source, what);
+	slot->hash = hash;
+	slot->shader = xgpu_compile_shader(type, source, what);
+	if (slot->shader && shader_cache.file && shader_cache.size < SHADER_CACHE_LIMIT)
+	{
+		size_t length = strlen(source);
+
+		/* (a pair's sources come before it in the file) */
+		fprintf(shader_cache.file, "S %u %016llx %lu\n", (unsigned)type, hash, (unsigned long)length);
+		fwrite(source, 1, length, shader_cache.file);
+		fputc('\n', shader_cache.file);
+		shader_cache.size += (long)length + 40;
+		slot->recorded = TRUE;
+	}
+	return slot->shader;
+}
+
+static GLuint cached_link_program(GLuint vertex_shader, GLuint fragment_shader, const char *what)
+{
+	struct cached_program *slot;
+
+	if (!shader_cache.enabled)
+		return xgpu_link_program(vertex_shader, fragment_shader, what);
+	slot = cached_program_slot(vertex_shader, fragment_shader);
+	if (slot && slot->vertex_shader && slot->program)
+		return slot->program;
+	if (!slot)
+		return xgpu_link_program(vertex_shader, fragment_shader, what);
+	slot->vertex_shader = vertex_shader;
+	slot->fragment_shader = fragment_shader;
+	slot->program = xgpu_link_program(vertex_shader, fragment_shader, what);
+	if (slot->program && shader_cache.file && shader_cache.size < SHADER_CACHE_LIMIT)
+	{
+		struct cached_shader *vertex = cached_shader_named(vertex_shader);
+		struct cached_shader *fragment = cached_shader_named(fragment_shader);
+
+		if (vertex && fragment && vertex->recorded && fragment->recorded)
+		{
+			fprintf(shader_cache.file, "P %016llx %016llx\n", vertex->hash, fragment->hash);
+			fflush(shader_cache.file);
+			shader_cache.size += 40;
+		}
+	}
+	slot->recorded = TRUE;
+	return slot->program;
+}
+
+static double seconds_now(void)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (double)now.tv_sec + (double)now.tv_nsec * 1.0e-9;
+}
+
+/* reads the cache and makes everything in it; opens it to record more */
+static void shader_cache_start(void)
+{
+	char path[512];
+	FILE *file;
+	char *data = NULL;
+	long size = 0;
+	unsigned long shader_count = 0, program_count = 0, failed = 0;
+	double started = seconds_now();
+
+	if (!config_boolean("display.shader_cache"))
+		return;
+	shader_cache.shaders = calloc(SHADER_CACHE_SLOTS, sizeof(*shader_cache.shaders));
+	shader_cache.programs = calloc(SHADER_CACHE_SLOTS, sizeof(*shader_cache.programs));
+	if (!shader_cache.shaders || !shader_cache.programs)
+	{
+		free(shader_cache.shaders);
+		free(shader_cache.programs);
+		return;
+	}
+	shader_cache.enabled = TRUE;
+	snprintf(path, sizeof(path), "%s/shader_cache.bin", platform_data_root());
+	if ((file = fopen(path, "rb")) != NULL)
+	{
+		if (fseek(file, 0, SEEK_END) == 0 && (size = ftell(file)) > 0 && size < SHADER_CACHE_LIMIT + 65536 &&
+			fseek(file, 0, SEEK_SET) == 0 && (data = malloc((size_t)size + 1)) != NULL)
+		{
+			if (fread(data, 1, (size_t)size, file) != (size_t)size)
+				size = 0;
+			data[size] = 0;
+		}
+		fclose(file);
+	}
+	if (data && size > 0)
+	{
+		char *cursor = data, *end = data + size;
+
+		glEnable(GL_RASTERIZER_DISCARD);
+		while (cursor < end)
+		{
+			if (cursor[0] == 'S' && cursor[1] == ' ')
+			{
+				unsigned type = 0;
+				unsigned long long hash = 0;
+				unsigned long length = 0;
+				char *source = strchr(cursor, '\n');
+				struct cached_shader *slot;
+
+				if (!source || sscanf(cursor, "S %u %llx %lu", &type, &hash, &length) != 3 ||
+					(unsigned long)(end - source - 1) < length + 1 || !hash)
+				{
+					break;
+				}
+				source++;
+				cursor = source + length + 1;
+				source[length] = 0;
+				if ((type != GL_VERTEX_SHADER && type != GL_FRAGMENT_SHADER) || source_hash(source) != hash)
+				{
+					failed++;
+					continue;
+				}
+				slot = cached_shader_slot(hash);
+				if (slot && !slot->hash)
+				{
+					slot->hash = hash;
+					slot->shader = xgpu_compile_shader(type, source, "cached");
+					slot->recorded = TRUE;
+					if (slot->shader)
+						shader_count++;
+					else
+						failed++;
+				}
+			}
+			else if (cursor[0] == 'P' && cursor[1] == ' ')
+			{
+				unsigned long long vertex_hash = 0, fragment_hash = 0;
+				char *line_end = strchr(cursor, '\n');
+				struct cached_shader *vertex, *fragment;
+
+				if (!line_end || sscanf(cursor, "P %llx %llx", &vertex_hash, &fragment_hash) != 2)
+					break;
+				cursor = line_end + 1;
+				vertex = cached_shader_slot(vertex_hash);
+				fragment = cached_shader_slot(fragment_hash);
+				if (vertex && fragment && vertex->shader && fragment->shader && vertex->hash == vertex_hash &&
+					fragment->hash == fragment_hash)
+				{
+					struct cached_program *slot = cached_program_slot(vertex->shader, fragment->shader);
+
+					if (slot && !slot->vertex_shader)
+					{
+						slot->vertex_shader = vertex->shader;
+						slot->fragment_shader = fragment->shader;
+						slot->program = xgpu_link_program(vertex->shader, fragment->shader, "cached");
+						slot->recorded = TRUE;
+						if (slot->program)
+						{
+							/* one point, not rasterized: the driver makes the
+							GPU's code for the program at its first draw */
+							glUseProgram(slot->program);
+							glDrawArrays(GL_POINTS, 0, 1);
+							program_count++;
+						}
+						else
+						{
+							failed++;
+						}
+					}
+				}
+			}
+			else
+			{
+				break;
+			}
+		}
+		glUseProgram(0);
+		glDisable(GL_RASTERIZER_DISCARD);
+		glFinish();
+	}
+	free(data);
+	shader_cache.size = size;
+	shader_cache.file = fopen(path, "ab");
+	platform_log("shader cache: %lu shaders and %lu programs made in %.1f s (%ld KB; %lu not usable)%s", shader_count,
+		program_count, seconds_now() - started, size / 1024, failed, shader_cache.file ? "" : "; cannot write it");
+}
+
 #ifndef HALO_ANDROID
 static void GLAPIENTRY gl_debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity,
 	GLsizei length, const GLchar *message, const void *user)
@@ -1485,6 +1775,7 @@ static void gl_initialize(void)
 		if (renderbuffer_size < maximum_target_size)
 			maximum_target_size = renderbuffer_size;
 	}
+	shader_cache_start();
 	xgpu_gl_state_invalidate();
 	device.gl_ready = TRUE;
 	if (anti_aliasing_value < 0)
@@ -2406,7 +2697,7 @@ static GLuint vertex_shader_get(struct vertex_shader_object *program, BOOL immed
 		char *source = nv2a_vertex_shader_to_glsl(program->instructions, program->instruction_count,
 			immediate ? 0 : device.vertex_shader->packed_mask, lit ? &program->lighting : NULL);
 
-		*shader = xgpu_compile_shader(GL_VERTEX_SHADER, source, "vertex");
+		*shader = cached_compile_shader(GL_VERTEX_SHADER, source, "vertex");
 		if (debug_settings.dump_shaders)
 		{
 			char path[512];
@@ -2458,7 +2749,7 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
 	entry->hash = hash;
 	entry->key = *key;
 	source = nv2a_pixel_shader_to_glsl(key);
-	entry->shader = xgpu_compile_shader(GL_FRAGMENT_SHADER, source, "pixel");
+	entry->shader = cached_compile_shader(GL_FRAGMENT_SHADER, source, "pixel");
 	if (debug_settings.dump_shaders)
 	{
 		char path[512];
@@ -2507,7 +2798,7 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
 	if (!vertex_shader || !fragment_shader)
 		return NULL;
 
-	entry->program = xgpu_link_program(vertex_shader, fragment_shader, "shader");
+	entry->program = cached_link_program(vertex_shader, fragment_shader, "shader");
 	if (!entry->program)
 		return NULL;
 	state_program(entry->program);
@@ -3784,20 +4075,25 @@ static void stream_reserve(unsigned long size)
 	}
 }
 
-static unsigned long stream_upload(const void *data, unsigned long size)
+/* alignment: the offset a multiple of it (a stream's stride, so that the
+draw can point at the buffer's start and reach the data by its first
+vertex: setup_streams), or 0 */
+static unsigned long stream_upload(const void *data, unsigned long size, unsigned long alignment)
 {
 	unsigned long offset;
 
 	size = (size + 15) & ~15UL;
-	stream_reserve(size);
+	stream_reserve(size + alignment);
 	offset = device.stream_offset;
+	if (alignment > 1)
+		offset = (offset + alignment - 1) / alignment * alignment;
 	state_array_buffer(device.stream_buffer);
 #ifdef HALO_ANDROID
 	host_gl_buffer_write(GL_ARRAY_BUFFER, (unsigned int)offset, (unsigned int)size, data);
 #else
 	buffer_upload(GL_ARRAY_BUFFER, offset, size, data);
 #endif
-	device.stream_offset += size;
+	device.stream_offset = offset + size;
 	return offset;
 }
 
@@ -3805,7 +4101,7 @@ static unsigned long stream_upload(const void *data, unsigned long size)
 /* stream_upload, with the D3DCOLOR elements of the stream turned from BGRA
 into the RGBA byte order ES reads */
 static unsigned long stream_upload_swizzled(const struct vertex_shader_object *declaration, unsigned long stream,
-	const unsigned char *data, unsigned long size, unsigned long stride)
+	const unsigned char *data, unsigned long size, unsigned long stride, unsigned long alignment)
 {
 	static unsigned char *scratch;
 	static unsigned long scratch_size;
@@ -3820,7 +4116,7 @@ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *d
 			offsets[count++] = element->offset;
 	}
 	if (!count || !stride)
-		return stream_upload(data, size);
+		return stream_upload(data, size, alignment);
 	if (scratch_size < size)
 	{
 		free(scratch);
@@ -3839,7 +4135,7 @@ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *d
 			color[2] = blue;
 		}
 	}
-	return stream_upload(scratch, size);
+	return stream_upload(scratch, size, alignment);
 }
 #endif
 
@@ -3914,7 +4210,20 @@ static BOOL stream_has_colors(const struct vertex_shader_object *declaration, un
 }
 #endif
 
-static void setup_streams(unsigned long first, unsigned long count)
+/* points the vertex shader's attributes at the streams' vertices first to
+first + count - 1, and returns the vertex the draw starts at: its first
+vertex, or the base vertex its indices are added to.
+
+The attributes point at a stream's data as near its buffer's start as a
+whole number of vertices allows, and the draw reaches the first vertex by
+that number (shift), which every stream must share: the one nearest its
+buffer's start (in vertices) sets it. A buffer drawn from again, at other
+vertices or uploaded anew (stream_upload puts a stream at a multiple of its
+stride), then finds its attributes pointing where they did, and the GL
+driver has no vertex arrays to set up again (on the Switch, a good part of
+its time in a draw). Without shift (a draw with no base vertex for its
+indices) the attributes point at the first vertex. */
+static long setup_streams(unsigned long first, unsigned long count, BOOL shift)
 {
 	struct vertex_shader_object *declaration = device.vertex_shader;
 	GLuint stream_buffers[16];
@@ -3922,6 +4231,7 @@ static void setup_streams(unsigned long first, unsigned long count)
 	BOOL placed[16] = { FALSE };
 	BOOL enabled[XGPU_VERTEX_ATTRIBUTE_COUNT] = { FALSE };
 	unsigned long index, total = 0;
+	unsigned long vertices = ~0UL;
 
 	/* the mirror first; then one reservation for everything streamed */
 	for (index = 0; index < declaration->element_count; index++)
@@ -3943,43 +4253,63 @@ static void setup_streams(unsigned long first, unsigned long count)
 		if (mirror_range(base, bytes, &stream_buffers[stream], &stream_offsets[stream], NULL))
 			continue;
 		stream_buffers[stream] = 0;
-		total += (bytes + 15) & ~15UL;
+		total += ((bytes + 15) & ~15UL) + stride;
 	}
 	stream_reserve(total);
+	/* the streams not in the mirror, uploaded */
+	for (index = 0; index < 16; index++)
+	{
+		unsigned long stride = device.streams[index].stride;
+
+		if (!placed[index])
+			continue;
+		if (!stream_buffers[index])
+		{
+			const unsigned char *base = PLATFORM_PHYSICAL_TO_VIRTUAL(device.streams[index].data);
+			unsigned long bytes = stride ? stride * count : 64;
+			unsigned long alignment = shift && stride && !(stride & 3) ? stride : 0;
+
+#ifdef HALO_ANDROID
+			stream_offsets[index] = stream_upload_swizzled(declaration, index, base + first * stride, bytes, stride,
+				alignment);
+#else
+			stream_offsets[index] = stream_upload(base + first * stride, bytes, alignment);
+#endif
+			stream_buffers[index] = device.stream_buffer;
+			stats.streamed_bytes += bytes;
+		}
+		/* (a stride that is not a multiple of 4 would point attributes at
+		unaligned offsets: not shifted) */
+		if (!stride || (stride & 3))
+			vertices = 0;
+		else if (stream_offsets[index] / stride < vertices)
+			vertices = stream_offsets[index] / stride;
+	}
+	if (!shift || vertices == ~0UL)
+		vertices = 0;
 	for (index = 0; index < declaration->element_count; index++)
 	{
 		const struct vertex_element *element = &declaration->elements[index];
 		unsigned long stream = element->stream;
 		unsigned long stride = device.streams[stream].stride;
+		unsigned long offset;
 		GLint size;
 		GLenum type;
 		GLboolean normalized;
 
 		if (!device.streams[stream].data || element->type == D3DVSDT_NONE)
 			continue;
-		if (!stream_buffers[stream])
-		{
-			const unsigned char *base = PLATFORM_PHYSICAL_TO_VIRTUAL(device.streams[stream].data);
-			unsigned long bytes = stride ? stride * count : 64;
-
-#ifdef HALO_ANDROID
-			stream_offsets[stream] = stream_upload_swizzled(declaration, stream, base + first * stride, bytes, stride);
-#else
-			stream_offsets[stream] = stream_upload(base + first * stride, bytes);
-#endif
-			stream_buffers[stream] = device.stream_buffer;
-			stats.streamed_bytes += bytes;
-		}
+		offset = stream_offsets[stream] - vertices * stride;
 		if (element->type == D3DVSDT_NORMPACKED3)
 		{
 			state_attribute_stream(element->reg, (GLuint)stream, stream_buffers[stream], 1, GL_UNSIGNED_INT, GL_FALSE,
-				TRUE, (GLsizei)stride, stream_offsets[stream], element->offset);
+				TRUE, (GLsizei)stride, offset, element->offset);
 		}
 		else
 		{
 			attribute_format(element, &size, &type, &normalized);
 			state_attribute_stream(element->reg, (GLuint)stream, stream_buffers[stream], size, type, normalized,
-				FALSE, (GLsizei)stride, stream_offsets[stream], element->offset);
+				FALSE, (GLsizei)stride, offset, element->offset);
 		}
 		enabled[element->reg] = TRUE;
 	}
@@ -3988,6 +4318,17 @@ static void setup_streams(unsigned long first, unsigned long count)
 		if (!enabled[index])
 			state_attribute_value(index, declaration->packed_mask & (1UL << index) ? NULL : device.attributes[index]);
 	}
+	return (long)vertices;
+}
+
+/* whether indexed draws can add a base vertex to their indices */
+static BOOL draws_have_base_vertex(void)
+{
+#ifdef HALO_ANDROID
+	return xgpu_capabilities.base_vertex;
+#else
+	return TRUE;
+#endif
 }
 
 static GLenum primitive_mode(D3DPRIMITIVETYPE type)
@@ -4050,19 +4391,29 @@ void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type, UINT start_v
 	if (!vertex_count || !prepare_draw(FALSE))
 		return;
 	trace_draw("draw", primitive_type, vertex_count, NULL);
-	setup_streams(start_vertex, vertex_count);
 	if (primitive_type == D3DPT_QUADLIST)
 	{
 		unsigned long count;
 		WORD *indices = quad_indices(NULL, vertex_count, &count);
+		long shift = setup_streams(start_vertex, vertex_count, draws_have_base_vertex());
 
-		glDrawElements(GL_TRIANGLES, (GLsizei)count, GL_UNSIGNED_SHORT,
-			(const void *)index_upload(indices, count * sizeof(WORD)));
+		if (shift)
+		{
+			glDrawElementsBaseVertex(GL_TRIANGLES, (GLsizei)count, GL_UNSIGNED_SHORT,
+				(const void *)index_upload(indices, count * sizeof(WORD)), (GLint)shift);
+		}
+		else
+		{
+			glDrawElements(GL_TRIANGLES, (GLsizei)count, GL_UNSIGNED_SHORT,
+				(const void *)index_upload(indices, count * sizeof(WORD)));
+		}
 		free(indices);
 	}
 	else
 	{
-		glDrawArrays(primitive_mode(primitive_type), 0, (GLsizei)vertex_count);
+		long shift = setup_streams(start_vertex, vertex_count, TRUE);
+
+		glDrawArrays(primitive_mode(primitive_type), (GLint)shift, (GLsizei)vertex_count);
 	}
 	gl_check_errors("draw");
 }
@@ -4070,6 +4421,7 @@ void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type, UINT start_v
 void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT vertex_count, CONST WORD *index_data)
 {
 	unsigned long minimum, maximum, index, count, generation = 0, index_offset = 0;
+	long shift;
 	WORD *indices = NULL;
 	const WORD *source = index_data;
 	GLuint index_buffer = 0;
@@ -4085,14 +4437,14 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT 
 		mirror_range((unsigned long)index_data, vertex_count * sizeof(WORD), &index_buffer, &index_offset, &generation);
 	index_extent(index_data, vertex_count, generation, mirrored, &minimum, &maximum);
 	trace_draw("indexed", primitive_type, vertex_count, NULL);
-	/* (the streams from the base vertex on: index i is vertex base + i) */
-	setup_streams(device.base_vertex_index + minimum, maximum - minimum + 1);
+	/* (the streams from the base vertex on: index i is vertex base + i;
+	the attributes start at vertex minimum, shift vertices before it) */
+	shift = setup_streams(device.base_vertex_index + minimum, maximum - minimum + 1, draws_have_base_vertex());
 	if (mirrored)
 	{
-		/* the attributes start at vertex minimum */
 		state_element_array_buffer(index_buffer);
 		glDrawElementsBaseVertex(primitive_mode(primitive_type), (GLsizei)vertex_count, GL_UNSIGNED_SHORT,
-			(const void *)index_offset, -(GLint)minimum);
+			(const void *)index_offset, (GLint)shift - (GLint)minimum);
 		return;
 	}
 	stats.streamed_bytes += vertex_count * sizeof(WORD);
@@ -4119,7 +4471,7 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT 
 #endif
 	(void)index;
 	glDrawElementsBaseVertex(primitive_mode(primitive_type), (GLsizei)count, GL_UNSIGNED_SHORT,
-		(const void *)index_upload(source, count * sizeof(WORD)), -(GLint)minimum);
+		(const void *)index_upload(source, count * sizeof(WORD)), (GLint)shift - (GLint)minimum);
 	free(indices);
 }
 
@@ -4156,24 +4508,39 @@ void WINAPI D3DDevice_End(void)
 	if (!count || !prepare_draw(TRUE))
 		return;
 	trace_draw("immediate", type, count, device.immediate_vertices);
-	offset = stream_upload(device.immediate_vertices, count * stride);
+	/* (at a multiple of the stride: the attributes point at the buffer's
+	start and the draw at the vertices, as setup_streams does; quads only
+	with a base vertex for their indices) */
+	BOOL shift = type != D3DPT_QUADLIST || draws_have_base_vertex();
+	unsigned long first;
+
+	offset = stream_upload(device.immediate_vertices, count * stride, stride);
+	first = shift ? offset / stride : 0;
 	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
 	{
 		state_attribute_stream(index, 0, device.stream_buffer, 4, GL_FLOAT, GL_FALSE, FALSE, (GLsizei)stride,
-			offset, index * 4 * sizeof(float));
+			offset - first * stride, index * 4 * sizeof(float));
 	}
 	if (type == D3DPT_QUADLIST)
 	{
 		unsigned long index_count;
 		WORD *indices = quad_indices(NULL, count, &index_count);
 
-		glDrawElements(GL_TRIANGLES, (GLsizei)index_count, GL_UNSIGNED_SHORT,
-			(const void *)index_upload(indices, index_count * sizeof(WORD)));
+		if (first)
+		{
+			glDrawElementsBaseVertex(GL_TRIANGLES, (GLsizei)index_count, GL_UNSIGNED_SHORT,
+				(const void *)index_upload(indices, index_count * sizeof(WORD)), (GLint)first);
+		}
+		else
+		{
+			glDrawElements(GL_TRIANGLES, (GLsizei)index_count, GL_UNSIGNED_SHORT,
+				(const void *)index_upload(indices, index_count * sizeof(WORD)));
+		}
 		free(indices);
 	}
 	else
 	{
-		glDrawArrays(primitive_mode(type), 0, (GLsizei)count);
+		glDrawArrays(primitive_mode(type), (GLint)first, (GLsizei)count);
 	}
 	gl_check_errors("immediate draw");
 }

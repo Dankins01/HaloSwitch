@@ -107,6 +107,11 @@ static const struct config_setting config_settings[] =
 	{ "display.interpolation", _config_boolean, "true", "HALO_INTERPOLATION", _environment_value, _platform_all,
 		"Draw a frame for every display refresh, blending between the game's 30\n"
 		"ticks a second; false keeps the original 30 frames a second." },
+	{ "display.shader_cache", _config_boolean, "true", "HALO_SHADER_CACHE", _environment_value, _platform_all,
+		"Keep the shaders the game has made (shader_cache.bin in the data folder)\n"
+		"and make them all again as the game starts, instead of in the middle of\n"
+		"the frame that first needs one, which stutters where the GPU driver is\n"
+		"slow to compile (Android, the Switch)." },
 	{ "display.direct_camera", _config_boolean, "true", "HALO_DIRECT_CAMERA", _environment_value, _platform_desktop,
 		"In first person, point the view where the player aims now instead of\n"
 		"where the last tick left it: the view turns the frame the mouse moves,\n"
