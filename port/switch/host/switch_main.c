@@ -138,8 +138,8 @@ static void log_start_writer(void)
 {
 	static Thread thread;
 
-	/* a low priority, on core 2 (the game's thread has core 0) */
-	if (R_FAILED(threadCreate(&thread, log_writer, NULL, NULL, 0x4000, 0x3f, 2)) || R_FAILED(threadStart(&thread)))
+	/* the lowest priority a game may use (0x3b), on core 2 (the game has core 0) */
+	if (R_FAILED(threadCreate(&thread, log_writer, NULL, NULL, 0x4000, 0x3b, 2)) || R_FAILED(threadStart(&thread)))
 		host_logf(HOST_LOG_WARN, "no log writer thread: the log is written in line");
 	else
 		log_writer_running = 1;
