@@ -628,6 +628,10 @@ static int is_log_path(const char *path)
 	return length >= 4 && !strcasecmp(path + length - 4, ".txt") && !strstr(path, "brokers");
 }
 
+static void cache_opened(int fd, const char *path);
+static void cache_closed(int fd);
+static long cached_read(int fd, void *buffer, size_t count);
+
 static long guest_openat(int dirfd, const char *guest_path, int flags, int mode)
 {
 	char path[PATH_MAX];
@@ -651,8 +655,223 @@ static long guest_openat(int dirfd, const char *guest_path, int flags, int mode)
 
 		if (fd >= 0 && (flags & 3) != 0 && is_log_path(path))
 			set_synced((int)fd, 1);
+		if (fd >= 0 && (flags & 3) == 0)
+			cache_opened((int)fd, path);
 		return fd;
 	}
+}
+
+/* ---------- map files, read through a cache
+
+Halo reads its .map files as it plays (textures, sounds, geometry), a few KB
+at a time; each read went to the SD card from the game's thread. They are
+read here in 256 KB blocks, kept (384 MB, the least recently used given back
+first): a read is a copy from memory once its block is in. */
+
+#define CACHE_BLOCK (256 * 1024)
+#define CACHE_BLOCKS 1536 /* 384 MB */
+#define CACHE_HASH 4096
+#define CACHE_FILES 16
+#define CACHE_DIRECT (1024 * 1024) /* reads this big go straight to the card */
+
+typedef struct CacheBlock
+{
+	int file, length; /* length: bytes in it (less at the end of the file) */
+	int64_t index;
+	uint8_t *data;
+	u64 used;
+	int next; /* in its hash chain */
+} CacheBlock;
+
+static CacheBlock cache_blocks[CACHE_BLOCKS];
+static int cache_heads[CACHE_HASH];
+static u64 cache_clock;
+static Mutex cache_lock;
+static struct { int fd; char path[256]; } cache_files[CACHE_FILES]; /* fd -1: closed, path kept (its blocks stay) */
+static u64 cache_hits, cache_misses;
+
+static int is_map_path(const char *path)
+{
+	size_t length = strlen(path);
+
+	return length >= 4 && !strcasecmp(path + length - 4, ".map");
+}
+
+/* the cache's number for a file opened for reading (-1: not cached) */
+static void cache_setup(void)
+{
+	static int ready;
+
+	if (ready)
+		return;
+	for (int i = 0; i < CACHE_HASH; i++)
+		cache_heads[i] = -1;
+	for (int i = 0; i < CACHE_FILES; i++)
+		cache_files[i].fd = -1;
+	ready = 1;
+}
+
+static int cache_file_of(int fd)
+{
+	if (fd < 0)
+		return -1;
+	for (int i = 0; i < CACHE_FILES; i++)
+		if (cache_files[i].fd == fd && cache_files[i].path[0])
+			return i;
+	return -1;
+}
+
+static void cache_opened(int fd, const char *path)
+{
+	int slot = -1;
+
+	if (!is_map_path(path))
+		return;
+	mutexLock(&cache_lock);
+	cache_setup();
+	for (int i = 0; i < CACHE_FILES && slot < 0; i++)
+		if (!strcmp(cache_files[i].path, path) && cache_files[i].fd < 0)
+			slot = i; /* reopened: its blocks are still good */
+	for (int i = 0; i < CACHE_FILES && slot < 0; i++)
+		if (!cache_files[i].path[0])
+			slot = i;
+	if (slot >= 0)
+	{
+		cache_files[slot].fd = fd;
+		snprintf(cache_files[slot].path, sizeof(cache_files[slot].path), "%s", path);
+	}
+	mutexUnlock(&cache_lock);
+}
+
+static void cache_closed(int fd)
+{
+	mutexLock(&cache_lock);
+	for (int i = 0; i < CACHE_FILES; i++)
+		if (cache_files[i].fd == fd)
+			cache_files[i].fd = -1;
+	mutexUnlock(&cache_lock);
+}
+
+/* the block (file, index), read in if it is not (cache_lock held) */
+static CacheBlock *cache_block(int file, int fd, int64_t index)
+{
+	unsigned hash = (unsigned)(file * 2654435761u ^ (unsigned)index * 40503u) % CACHE_HASH;
+	CacheBlock *block;
+	int slot;
+	off_t previous;
+	ssize_t got;
+
+	for (slot = cache_heads[hash]; slot >= 0; slot = cache_blocks[slot].next)
+		if (cache_blocks[slot].file == file && cache_blocks[slot].index == index)
+		{
+			cache_blocks[slot].used = ++cache_clock;
+			cache_hits++;
+			return &cache_blocks[slot];
+		}
+	cache_misses++;
+	/* a free block, or the least recently used one, taken out of its chain */
+	slot = -1;
+	for (int i = 0; i < CACHE_BLOCKS; i++)
+		if (!cache_blocks[i].data)
+		{
+			cache_blocks[i].data = malloc(CACHE_BLOCK);
+			if (cache_blocks[i].data)
+				slot = i;
+			break;
+		}
+	if (slot < 0)
+	{
+		u64 oldest = ~0ull;
+		unsigned old_hash;
+		int *link;
+
+		for (int i = 0; i < CACHE_BLOCKS; i++)
+			if (cache_blocks[i].data && cache_blocks[i].used < oldest)
+			{
+				oldest = cache_blocks[i].used;
+				slot = i;
+			}
+		if (slot < 0)
+			return NULL;
+		old_hash = (unsigned)(cache_blocks[slot].file * 2654435761u ^ (unsigned)cache_blocks[slot].index * 40503u) % CACHE_HASH;
+		for (link = &cache_heads[old_hash]; *link >= 0; link = &cache_blocks[*link].next)
+			if (*link == slot)
+			{
+				*link = cache_blocks[slot].next;
+				break;
+			}
+	}
+	block = &cache_blocks[slot];
+	previous = lseek(fd, 0, SEEK_CUR);
+	if (previous < 0 || lseek(fd, (off_t)(index * CACHE_BLOCK), SEEK_SET) < 0)
+		return NULL;
+	got = read(fd, block->data, CACHE_BLOCK);
+	lseek(fd, previous, SEEK_SET);
+	if (got < 0)
+		return NULL;
+	block->file = file;
+	block->index = index;
+	block->length = (int)got;
+	block->used = ++cache_clock;
+	block->next = cache_heads[hash];
+	cache_heads[hash] = slot;
+	return block;
+}
+
+/* count bytes at offset from a cached file; -1 with errno when it fails */
+static long cache_read(int file, int fd, uint8_t *out, size_t count, int64_t offset)
+{
+	size_t done = 0;
+
+	mutexLock(&cache_lock);
+	while (done < count)
+	{
+		int64_t at = offset + (int64_t)done;
+		CacheBlock *block = cache_block(file, fd, at / CACHE_BLOCK);
+		size_t inside = (size_t)(at % CACHE_BLOCK), take;
+
+		if (!block)
+		{
+			mutexUnlock(&cache_lock);
+			return done ? (long)done : -1;
+		}
+		if ((int)inside >= block->length)
+			break; /* the end of the file */
+		take = (size_t)block->length - inside;
+		if (take > count - done)
+			take = count - done;
+		memcpy(out + done, block->data + inside, take);
+		done += take;
+		if (block->length < CACHE_BLOCK && inside + take >= (size_t)block->length)
+			break;
+	}
+	mutexUnlock(&cache_lock);
+	return (long)done;
+}
+
+/* a read at the descriptor's offset, which it moves on */
+static long cached_read(int fd, void *buffer, size_t count)
+{
+	int file = cache_file_of(fd);
+	off_t at;
+	long got;
+
+	if (file < 0 || count >= CACHE_DIRECT || (at = lseek(fd, 0, SEEK_CUR)) < 0)
+		return result_of(read(fd, buffer, count));
+	got = cache_read(file, fd, buffer, count, (int64_t)at);
+	if (got < 0)
+		return -linux_errno(errno);
+	lseek(fd, at + got, SEEK_SET);
+	return got;
+}
+
+void host_cache_report(void)
+{
+	u64 hits = cache_hits, misses = cache_misses;
+
+	if (hits + misses)
+		host_logf(HOST_LOG_INFO, "map cache: %llu reads of blocks, %.1f%% from memory",
+			(unsigned long long)(hits + misses), 100.0 * (double)hits / (double)(hits + misses));
 }
 
 /* pread and pwrite: positioned without moving the descriptor's offset */
@@ -662,7 +881,14 @@ static long positioned(int fd, void *buffer, size_t count, int64_t offset, int w
 {
 	off_t previous;
 	ssize_t result;
+	int file;
 
+	if (!write_it && (file = cache_file_of(fd)) >= 0 && count < CACHE_DIRECT)
+	{
+		long got = cache_read(file, fd, buffer, count, offset);
+
+		return got < 0 ? -linux_errno(errno) : got;
+	}
 	mutexLock(&positioned_lock);
 	previous = lseek(fd, 0, SEEK_CUR);
 	if (previous < 0 || lseek(fd, (off_t)offset, SEEK_SET) < 0)
@@ -702,7 +928,7 @@ static long guest_vector(int fd, uint64_t vector, int count, int64_t offset, int
 		else if (positional)
 			done = positioned(fd, base, length, offset + total, write_it);
 		else
-			done = write_it ? result_of(write(fd, base, length)) : result_of(read(fd, base, length));
+			done = write_it ? result_of(write(fd, base, length)) : cached_read(fd, base, length);
 		if (done < 0)
 			return total ? total : done;
 		total += done;
@@ -739,7 +965,7 @@ long long host_syscall(long long number, long long a, long long b, long long c,
 	case GUEST_SYS_read:
 		if (a == 0)
 			return 0;
-		return result_of(read((int)a, GUEST(void *, b), (size_t)(uint32_t)c));
+		return cached_read((int)a, GUEST(void *, b), (size_t)(uint32_t)c);
 	case GUEST_SYS_write:
 		if (a == 1 || a == 2)
 		{
@@ -750,7 +976,7 @@ long long host_syscall(long long number, long long a, long long b, long long c,
 			long written = result_of(write((int)a, GUEST(const void *, b), (size_t)(uint32_t)c));
 
 			if (written > 0 && is_synced((int)a))
-				fsync((int)a);
+				host_log_file_dirty((int)a);
 			return written;
 		}
 	case GUEST_SYS_readv:
@@ -760,7 +986,7 @@ long long host_syscall(long long number, long long a, long long b, long long c,
 		long written = guest_vector((int)a, (uint64_t)b, (int)c, 0, 0, 1);
 
 		if (written > 0 && is_synced((int)a))
-			fsync((int)a);
+			host_log_file_dirty((int)a);
 		return written;
 	}
 	case GUEST_SYS_preadv:
@@ -778,7 +1004,10 @@ long long host_syscall(long long number, long long a, long long b, long long c,
 			return directory_close((int)a);
 		if (a >= 0 && a <= 2)
 			return 0;
+		if (is_synced((int)a))
+			host_log_file_closing((int)a);
 		set_synced((int)a, 0);
+		cache_closed((int)a);
 		return result_of(close((int)a));
 	case GUEST_SYS_lseek:
 		return result_of((long)lseek((int)a, (off_t)b, (int)c));

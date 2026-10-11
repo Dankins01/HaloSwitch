@@ -56,48 +56,173 @@ uint64_t host_program_base(void)
 
 /* ---------- logging and leaving */
 
-/* The log is written with write() and synced at every line: the SD card's
-file system keeps written data in its cache until the file is synced, so a
-crash would otherwise lose the lines that say where it happened. */
+/* The log goes to the SD card from a thread of its own: writing and syncing
+it on the game's thread cost a few percent of every frame. The writer syncs
+what it writes (the SD card's file system keeps written data in its cache
+until the file is synced), and errors and crash reports are written and
+synced at once, with everything before them, so a crash still leaves the
+lines that say where it happened. Halo's own .txt logs are synced by the
+writer too (host_log_file_dirty). */
 static int log_fd = -1;
-static Mutex log_lock;
+static Mutex log_lock;   /* the buffer */
+static Mutex log_io_lock; /* the writes, in order */
+static CondVar log_wake;
 static u64 start_tick;
+#define LOG_BUFFER (256 * 1024)
+static char log_buffer[LOG_BUFFER];
+static size_t log_used;
+static int log_dropped;
+#define DIRTY_FILES 8
+static int dirty_files[DIRTY_FILES] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+static int log_writer_running;
 
-static void log_write(int priority, const char *text)
+static size_t log_format(char *line, size_t size, int priority, const char *text)
 {
 	static const char *const names[] = { "", "", "", "", "info", "warn", "error" };
 	const char *name = priority >= 4 && priority <= 6 ? names[priority] : "";
-	char line[1100];
 	u64 milliseconds = armTicksToNs(armGetSystemTick() - start_tick) / 1000000;
-	int length = snprintf(line, sizeof(line), "%6llu.%03llu [%s] %s\n",
+	int length = snprintf(line, size, "%6llu.%03llu [%s] %s\n",
 		(unsigned long long)(milliseconds / 1000), (unsigned long long)(milliseconds % 1000), name, text);
 
-	if (length > (int)sizeof(line) - 1)
-		length = (int)sizeof(line) - 1;
-	if (log_fd >= 0 && length > 0)
+	if (length < 0)
+		return 0;
+	return (size_t)length > size - 1 ? size - 1 : (size_t)length;
+}
+
+/* what is buffered, out to the card and synced (log_io_lock held) */
+static void log_drain_locked(void)
+{
+	static char out[LOG_BUFFER];
+	size_t size;
+	int dirty[DIRTY_FILES];
+
+	mutexLock(&log_lock);
+	size = log_used;
+	memcpy(out, log_buffer, size);
+	log_used = 0;
+	memcpy(dirty, dirty_files, sizeof(dirty));
+	for (int i = 0; i < DIRTY_FILES; i++)
+		dirty_files[i] = -1;
+	mutexUnlock(&log_lock);
+	if (log_fd >= 0 && size)
 	{
-		write(log_fd, line, (size_t)length);
+		write(log_fd, out, size);
 		fsync(log_fd);
 	}
+	for (int i = 0; i < DIRTY_FILES; i++)
+		if (dirty[i] >= 0)
+			fsync(dirty[i]);
+}
+
+static void log_drain(void)
+{
+	mutexLock(&log_io_lock);
+	log_drain_locked();
+	mutexUnlock(&log_io_lock);
+}
+
+static void log_writer(void *unused)
+{
+	(void)unused;
+	for (;;)
+	{
+		mutexLock(&log_lock);
+		if (!log_used)
+			condvarWaitTimeout(&log_wake, &log_lock, 250000000ull);
+		mutexUnlock(&log_lock);
+		log_drain();
+	}
+}
+
+static void log_start_writer(void)
+{
+	static Thread thread;
+
+	/* a low priority, on core 2 (the game's thread has core 0) */
+	if (R_FAILED(threadCreate(&thread, log_writer, NULL, NULL, 0x4000, 0x3f, 2)) || R_FAILED(threadStart(&thread)))
+		host_logf(HOST_LOG_WARN, "no log writer thread: the log is written in line");
+	else
+		log_writer_running = 1;
+}
+
+/* a .txt file the game writes: synced by the writer, not at each write */
+void host_log_file_dirty(int fd)
+{
+	mutexLock(&log_lock);
+	for (int i = 0; i < DIRTY_FILES; i++)
+		if (dirty_files[i] == fd)
+		{
+			mutexUnlock(&log_lock);
+			return;
+		}
+	for (int i = 0; i < DIRTY_FILES; i++)
+		if (dirty_files[i] == -1)
+		{
+			dirty_files[i] = fd;
+			break;
+		}
+	mutexUnlock(&log_lock);
+	condvarWakeOne(&log_wake);
+}
+
+/* before such a file is closed: its data synced, and the writer told */
+void host_log_file_closing(int fd)
+{
+	int dirty = 0;
+
+	mutexLock(&log_lock);
+	for (int i = 0; i < DIRTY_FILES; i++)
+		if (dirty_files[i] == fd)
+		{
+			dirty_files[i] = -1;
+			dirty = 1;
+		}
+	mutexUnlock(&log_lock);
+	if (dirty)
+		fsync(fd);
 }
 
 void host_log(int priority, const char *text)
 {
+	char line[1100];
+	size_t length = log_format(line, sizeof(line), priority, text);
+
 	svcOutputDebugString(text, strlen(text));
 	mutexLock(&log_lock);
-	log_write(priority, text);
+	if (log_used + length <= LOG_BUFFER)
+	{
+		memcpy(log_buffer + log_used, line, length);
+		log_used += length;
+	}
+	else
+		log_dropped++;
 	mutexUnlock(&log_lock);
+	if (priority >= HOST_LOG_ERROR || !log_writer_running)
+		log_drain();
+	else
+		condvarWakeOne(&log_wake);
 }
 
 void host_log_crash(const char *text)
 {
-	/* (the crashed thread may hold the lock: write without it then) */
-	int locked = mutexTryLock(&log_lock);
+	/* (the crashed thread may hold a lock: write without it then) */
+	char line[1100];
+	size_t length = log_format(line, sizeof(line), HOST_LOG_ERROR, text);
+	int locked = mutexTryLock(&log_io_lock);
 
 	svcOutputDebugString(text, strlen(text));
-	log_write(HOST_LOG_ERROR, text);
-	if (locked)
+	if (locked && mutexTryLock(&log_lock))
+	{
 		mutexUnlock(&log_lock);
+		log_drain_locked();
+	}
+	if (log_fd >= 0)
+	{
+		write(log_fd, line, length);
+		fsync(log_fd);
+	}
+	if (locked)
+		mutexUnlock(&log_io_lock);
 }
 
 void host_logf(int priority, const char *format, ...)
@@ -119,13 +244,14 @@ static void leave(int code)
 {
 	host_logf(HOST_LOG_INFO, "leaving (%d)", code);
 	clocks_restore();
-	mutexLock(&log_lock);
+	log_drain();
+	mutexLock(&log_io_lock);
 	if (log_fd >= 0)
 	{
 		close(log_fd);
 		log_fd = -1;
 	}
-	mutexUnlock(&log_lock);
+	mutexUnlock(&log_io_lock);
 	svcExitProcess();
 	__builtin_unreachable();
 }
@@ -581,6 +707,12 @@ static void watchdog(void *unused)
 				(double)count / seconds, count ? seconds * 1000.0 / (double)count : 0.0,
 				(double)(gpu - window_gpu) * per_frame, (double)(swap - window_swap) * per_frame,
 				(unsigned long long)(faults - window_faults));
+			{
+				static int reports;
+
+				if (++reports % 3 == 0)
+					host_cache_report();
+			}
 			window_gpu = gpu;
 			window_start = now;
 			window_frames = frames;
@@ -635,12 +767,15 @@ int main(int argc, char *argv[])
 	(void)argc;
 	(void)argv;
 	mutexInit(&log_lock);
+	mutexInit(&log_io_lock);
+	condvarInit(&log_wake);
 	mkdir("/switch", 0755);
 	mkdir(SWITCH_DATA_ROOT, 0755);
 	mkdir(SWITCH_SAVE_ROOT, 0755);
 	chdir("sdmc:" SWITCH_DATA_ROOT);
 	start_tick = armGetSystemTick();
 	log_fd = open(SWITCH_DATA_ROOT "/host.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	log_start_writer();
 	host_logf(HOST_LOG_INFO, "OpenCE for Nintendo Switch starting (build %s); program at %p",
 		SWITCH_BUILD, (void *)(uintptr_t)host_program_base());
 	check_memory();

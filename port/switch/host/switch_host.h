@@ -44,6 +44,9 @@ debug output (svcOutputDebugString, visible with a debugger or nxlink) */
 #define HOST_LOG_INFO 4
 #define HOST_LOG_WARN 5
 #define HOST_LOG_ERROR 6
+void host_log_file_dirty(int fd);   /* a game .txt log: synced by the log writer */
+void host_log_file_closing(int fd);
+void host_cache_report(void); /* the map cache's hits */
 
 void host_logf(int priority, const char *format, ...) __attribute__((format(printf, 2, 3)));
 void host_log(int priority, const char *text);
