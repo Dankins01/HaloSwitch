@@ -393,6 +393,10 @@ int host_memory_initialize(uint32_t base, uint32_t size)
 {
 	mutexInit(&memory_lock);
 	process = envGetOwnProcessHandle();
+	/* an installed title has no loader to give it the handle: the kernel
+	takes the current process's pseudo-handle for these calls */
+	if (process == INVALID_HANDLE)
+		process = CUR_PROCESS_HANDLE;
 	if (process == INVALID_HANDLE || !envIsSyscallHinted(0x73) || !envIsSyscallHinted(0x77))
 	{
 		host_logf(HOST_LOG_ERROR, "this homebrew loader gives no process handle or no code memory system calls; "

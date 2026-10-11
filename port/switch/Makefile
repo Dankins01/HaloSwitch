@@ -47,7 +47,7 @@ OBJECTS  := $(patsubst host/%.c,$(BUILD)/%.o,$(HOST_C)) \
             $(patsubst host/%.s,$(BUILD)/%_s.o,$(HOST_S)) \
             $(BUILD)/xiso.o $(BUILD)/host_import_table.o
 
-.PHONY: all clean
+.PHONY: title all clean
 
 all: $(TARGET).nro
 
@@ -90,6 +90,23 @@ $(BUILD)/$(TARGET).nacp: Makefile | $(BUILD)
 $(TARGET).nro: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).nacp $(ROMFS)/halo_guest.elf $(ROMFS)/brokers.txt $(ICON)
 	@$(DEVKITPRO)/tools/bin/elf2nro $< $@ --icon=$(ICON) --nacp=$(BUILD)/$(TARGET).nacp --romfsdir=$(ROMFS)
 	@echo built $@
+
+# The parts of an installed title (an NSP): packed on the user's PC with
+# their own console's keys (title/pack-title.bat, hacbrewpack), with their
+# game's maps added to the romfs. title/opence.json: the program's
+# permissions (as hbloader's, as an application), its title ID.
+TITLE := $(BUILD)/title-kit
+title: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).nacp $(ROMFS)/halo_guest.elf $(ROMFS)/brokers.txt $(ICON)
+	@rm -rf $(TITLE) && mkdir -p $(TITLE)/exefs $(TITLE)/control $(TITLE)/romfs
+	@$(DEVKITPRO)/tools/bin/elf2nso $(BUILD)/$(TARGET).elf $(TITLE)/exefs/main
+	@$(DEVKITPRO)/tools/bin/npdmtool title/opence.json $(TITLE)/exefs/main.npdm
+	@$(DEVKITPRO)/tools/bin/nacptool --create "Halo: Combat Evolved" "$(APP_AUTHOR)" "$(APP_VERSION)" $(TITLE)/control/control.nacp \
+		--titleid=0100484c4f430000
+	@cp $(ICON) $(TITLE)/control/icon_AmericanEnglish.dat
+	@cp -r $(ROMFS)/. $(TITLE)/romfs/
+	@cp title/pack-title.bat title/README.txt $(TITLE)/
+	@cd $(BUILD) && rm -f opence-title-kit.zip && zip -qr opence-title-kit.zip title-kit
+	@echo built $(BUILD)/opence-title-kit.zip
 
 clean:
 	@rm -rf $(BUILD) $(TARGET).nro

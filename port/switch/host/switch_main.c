@@ -357,7 +357,8 @@ static int has_game_data(void)
 {
 	struct stat information;
 
-	return stat(SWITCH_DATA_ROOT "/maps/ui.map", &information) == 0;
+	/* on the SD card, or inside an installed title (romfs:/maps) */
+	return stat(SWITCH_DATA_ROOT "/maps/ui.map", &information) == 0 || stat("romfs:/maps/ui.map", &information) == 0;
 }
 
 static int has_suffix(const char *name, const char *suffix)

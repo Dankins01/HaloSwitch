@@ -106,10 +106,19 @@ jobs:
           fi
           exit "$status"
 
+      # the parts of an installed title, packed on the user's PC with their keys
+      - name: Build the title kit
+        shell: bash
+        run: |
+          command -v zip >/dev/null || dkp-pacman -S --noconfirm zip || apt-get install -y zip || true
+          make -C port/switch GUEST=../../build/android SWITCH_BUILD="${GITHUB_SHA::7}" title
+
       - uses: actions/upload-artifact@v4
         with:
           name: opence-switch
-          path: port/switch/opence.nro
+          path: |
+            port/switch/opence.nro
+            port/switch/build/opence-title-kit.zip
           retention-days: 14
 
       # the host's symbols, for reading crash reports
@@ -139,6 +148,7 @@ jobs:
         run: |
           mkdir publish
           cp out/opence.nro out/opence.elf out/halo_guest.elf publish/
+          cp out/opence-title-kit.zip publish/ 2>/dev/null || find out -name opence-title-kit.zip -exec cp {} publish/ \;
           cd publish
           for file in opence.elf halo_guest.elf; do
             # (GitHub refuses files over 100 MB)

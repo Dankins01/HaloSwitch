@@ -497,6 +497,30 @@ static long guest_getdents64(int fd, uint64_t buffer, uint32_t size)
 
 /* ---------- paths */
 
+/* An installed title carries the maps in its own files (romfs:/maps): the
+game's maps folder is read from there when the SD card has no such file */
+static void maps_from_romfs(char *result, size_t size)
+{
+	static const char *const prefixes[] = { "sdmc:" SWITCH_DATA_ROOT "/maps", SWITCH_DATA_ROOT "/maps", "maps", "./maps" };
+	struct stat information;
+	char romfs_path[PATH_MAX];
+
+	for (unsigned i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+	{
+		size_t length = strlen(prefixes[i]);
+
+		if (strncasecmp(result, prefixes[i], length) || (result[length] && result[length] != '/'))
+			continue;
+		if (stat(result, &information) == 0)
+			return; /* on the SD card: that one */
+		if ((size_t)snprintf(romfs_path, sizeof(romfs_path), "romfs:/maps%s", result + length) >= sizeof(romfs_path))
+			return;
+		if (stat(romfs_path, &information) == 0 && strlen(romfs_path) < size)
+			strcpy(result, romfs_path);
+		return;
+	}
+}
+
 static int resolve_path(int dirfd, const char *path, char *result, size_t size)
 {
 	struct directory *directory;
@@ -508,6 +532,7 @@ static int resolve_path(int dirfd, const char *path, char *result, size_t size)
 		if (strlen(path) + 1 > size)
 			return -LINUX_ENAMETOOLONG;
 		strcpy(result, path);
+		maps_from_romfs(result, size);
 		return 0;
 	}
 	directory = directory_of(dirfd);
@@ -515,6 +540,7 @@ static int resolve_path(int dirfd, const char *path, char *result, size_t size)
 		return -LINUX_EBADF;
 	if ((size_t)snprintf(result, size, "%s/%s", directory->path, path) >= size)
 		return -LINUX_ENAMETOOLONG;
+	maps_from_romfs(result, size);
 	return 0;
 }
 
