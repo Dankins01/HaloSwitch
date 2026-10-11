@@ -16,6 +16,7 @@ if not exist hacbrewpack.exe (
   echo https://github.com/The-4n/hacBrewPack/releases and put it here.
   goto :fail
 )
+if not exist prod.keys if exist ..\prod.keys copy /y ..\prod.keys prod.keys >nul
 if not exist prod.keys (
   echo prod.keys is not in this folder. Copy it here from your SD card
   echo ^(switch\prod.keys, made by Lockpick_RCM^).
