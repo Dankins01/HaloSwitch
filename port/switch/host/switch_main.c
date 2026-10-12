@@ -252,6 +252,10 @@ static void leave(int code)
 		log_fd = -1;
 	}
 	mutexUnlock(&log_io_lock);
+	/* the applet's session closed first, as libnx's own exit does: the
+	system then sees the program leave, not fail ("The software was closed
+	because an error occurred"). Nothing else is undone: the process ends */
+	appletExit();
 	svcExitProcess();
 	__builtin_unreachable();
 }
