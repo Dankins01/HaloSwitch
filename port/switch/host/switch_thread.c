@@ -159,52 +159,6 @@ static struct thread_start *finished_threads;
 static int reaper_started;
 static Thread reaper_thread;
 
-/* every thread but the main one (the game's, and the host's own), to pause
-them all before the process leaves: the game's memory is unmapped then, and
-from the Homebrew Menu hbloader then replaces this program's code */
-#define GUEST_THREADS 128
-static Handle guest_threads[GUEST_THREADS];
-static Mutex guest_threads_lock;
-static void guest_thread_add(Handle handle);
-
-void host_thread_register(Handle handle)
-{
-	guest_thread_add(handle);
-}
-
-static void guest_thread_add(Handle handle)
-{
-	mutexLock(&guest_threads_lock);
-	for (int i = 0; i < GUEST_THREADS; i++)
-		if (!guest_threads[i])
-		{
-			guest_threads[i] = handle;
-			break;
-		}
-	mutexUnlock(&guest_threads_lock);
-}
-
-static void guest_thread_remove(Handle handle)
-{
-	mutexLock(&guest_threads_lock);
-	for (int i = 0; i < GUEST_THREADS; i++)
-		if (guest_threads[i] == handle)
-			guest_threads[i] = 0;
-	mutexUnlock(&guest_threads_lock);
-}
-
-int host_threads_pause_all(void)
-{
-	int paused = 0;
-
-	mutexLock(&guest_threads_lock);
-	for (int i = 0; i < GUEST_THREADS; i++)
-		if (guest_threads[i] && R_SUCCEEDED(svcSetThreadActivity(guest_threads[i], ThreadActivity_Paused)))
-			paused++;
-	mutexUnlock(&guest_threads_lock);
-	return paused;
-}
-
 static void reaper(void *unused)
 {
 	(void)unused;
@@ -220,7 +174,6 @@ static void reaper(void *unused)
 		mutexUnlock(&reaper_lock);
 		threadWaitForExit(&finished->thread);
 		host_profile_thread_ended(finished->thread.handle);
-		guest_thread_remove(finished->thread.handle);
 		threadClose(&finished->thread);
 		host_low_unmap(finished->mapping, finished->mapping_size);
 		free(finished);
@@ -261,7 +214,7 @@ int host_native_thread_create(void *(*function)(void *), void *argument, size_t 
 	if (!reaper_started)
 	{
 		if (R_SUCCEEDED(threadCreate(&reaper_thread, reaper, NULL, NULL, 0x4000, HOST_THREAD_PRIORITY, -2)) &&
-			R_SUCCEEDED(threadStart(&reaper_thread)) && (guest_thread_add(reaper_thread.handle), 1))
+			R_SUCCEEDED(threadStart(&reaper_thread)))
 		{
 			reaper_started = 1;
 		}
@@ -291,15 +244,11 @@ int host_native_thread_create(void *(*function)(void *), void *argument, size_t 
 	if (R_SUCCEEDED(result))
 	{
 		host_profile_thread_started(start->thread.handle, name);
-		guest_thread_add(start->thread.handle);
 		if (name && !strcmp(name, "game"))
 			game_thread = start->thread.handle;
 		result = threadStart(&start->thread);
 		if (R_FAILED(result))
-		{
 			host_profile_thread_ended(start->thread.handle);
-			guest_thread_remove(start->thread.handle);
-		}
 	}
 	if (R_FAILED(result))
 	{

@@ -103,9 +103,6 @@ write to a watched page, which is now writeable again */
 int host_memory_watch_fault(uint64_t address);
 /* a line of text describing the process's memory, for the log */
 void host_memory_describe(void);
-void host_memory_release(void);
-int host_threads_pause_all(void);
-void host_thread_register(Handle thread); /* a host thread, paused too before leaving */ /* every game thread paused (before leaving) */ /* the guest's mappings undone, before leaving */
 
 /* ---------- the guest image (switch_loader.c) */
 

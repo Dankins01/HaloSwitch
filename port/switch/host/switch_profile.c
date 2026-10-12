@@ -490,6 +490,4 @@ void host_profile_start(void)
 	}
 	host_logf(HOST_LOG_INFO, "profile: sampling every %lld ms, a report every %d s (profile.txt)",
 		SAMPLE_NANOSECONDS / 1000000, REPORT_SECONDS);
-	if (thread.handle)
-		host_thread_register(thread.handle);
 }

@@ -318,21 +318,9 @@ static void *backing_new(uint64_t size)
 
 /* aliases backing at address (the alias is readable, AliasCode); 0 on
 success */
-#define ALIASES 256
-static struct { uint64_t address, size; void *backing; } aliases[ALIASES];
-static int alias_count;
-
 static int alias(uint64_t address, uint64_t size, void *backing)
 {
 	Result result = svcMapProcessCodeMemory(process, address, (u64)(uintptr_t)backing, size);
-
-	if (R_SUCCEEDED(result) && alias_count < ALIASES)
-	{
-		aliases[alias_count].address = address;
-		aliases[alias_count].size = size;
-		aliases[alias_count].backing = backing;
-		alias_count++;
-	}
 
 	if (R_FAILED(result))
 	{
@@ -887,19 +875,4 @@ void host_memory_watch_forget(uint32_t address, uint32_t size)
 		page_protected[page] = 0;
 		page_generation[page] = __atomic_add_fetch(&current_generation, 1, __ATOMIC_SEQ_CST);
 	}
-}
-
-/* before leaving: the aliases undone, as hbloader undoes an NRO's, so the
-process ends (or hbloader loads the menu again) the normal way */
-void host_memory_release(void)
-{
-	int failed = 0;
-
-	for (int i = alias_count - 1; i >= 0; i--)
-		if (R_FAILED(svcUnmapProcessCodeMemory(process, aliases[i].address, (u64)(uintptr_t)aliases[i].backing,
-			aliases[i].size)))
-			failed++;
-	if (failed)
-		host_logf(HOST_LOG_WARN, "%d of %d guest mappings could not be undone", failed, alias_count);
-	alias_count = 0;
 }

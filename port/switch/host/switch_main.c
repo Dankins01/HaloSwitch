@@ -24,7 +24,6 @@ SD card layout (port/switch/README.md):
 #include "switch_host.h"
 
 #include <switch.h>
-#include <SDL2/SDL.h>
 
 #include <dirent.h>
 #include <errno.h>
@@ -144,8 +143,6 @@ static void log_start_writer(void)
 		host_logf(HOST_LOG_WARN, "no log writer thread: the log is written in line");
 	else
 		log_writer_running = 1;
-	if (thread.handle)
-		host_thread_register(thread.handle);
 }
 
 /* a .txt file the game writes: synced by the writer, not at each write */
@@ -239,38 +236,14 @@ void host_logf(int priority, const char *format, ...)
 	host_log(priority, text);
 }
 
-/* ends the process: back to the Home menu (or, from the homebrew menu, to it) */
+/* ends the process: back to the Home menu (hbloader cannot reuse a process
+whose memory is mapped below 4 GB for the guest) */
 static void clocks_restore(void);
 static void leave(int code) __attribute__((noreturn));
-static void finish(int code) __attribute__((noreturn));
-
-/* the leaving itself, on the main thread (its stack is not the game's
-memory, which is unmapped here): the audio stopped (it runs the game's
-code), the game's threads paused, its memory unmapped, then libnx's exit
-(the applet told): ended with svcExitProcess, the system said "The
-software was closed because an error occurred" */
-static Handle main_thread_of_process; /* (threadGetSelf is NULL on the main thread: handles) */
-static volatile int exit_code, exit_requested;
-static UEvent exit_event;
-
-static void finish(int code)
+static void leave(int code)
 {
-	int paused;
-
+	host_logf(HOST_LOG_INFO, "leaving (%d)", code);
 	clocks_restore();
-	SDL_Quit();
-	/* the log's locks held while the others are paused (a thread paused
-	holding one would stop the rest of this); from here the log is written
-	in line */
-	log_drain();
-	log_writer_running = 0;
-	mutexLock(&log_io_lock);
-	mutexLock(&log_lock);
-	paused = host_threads_pause_all();
-	mutexUnlock(&log_lock);
-	mutexUnlock(&log_io_lock);
-	host_memory_release();
-	host_logf(HOST_LOG_INFO, "left: %d threads of the game paused, its memory released", paused);
 	log_drain();
 	mutexLock(&log_io_lock);
 	if (log_fd >= 0)
@@ -279,20 +252,50 @@ static void finish(int code)
 		log_fd = -1;
 	}
 	mutexUnlock(&log_io_lock);
-	exit(code);
+	svcExitProcess();
+	__builtin_unreachable();
 }
 
-static void leave(int code)
+int host_show_error(const char *message)
 {
-	host_logf(HOST_LOG_INFO, "leaving (%d)", code);
-	if (!main_thread_of_process || threadGetCurHandle() == main_thread_of_process)
-		finish(code);
-	/* another thread (the game's): the main thread leaves */
-	exit_code = code;
-	exit_requested = 1;
-	ueventSignal(&exit_event);
-	for (;;)
-		svcSleepThread(1000000000LL);
+	AppletType type = appletGetAppletType();
+
+	/* the application error applet only under an application ([10.0.0+]
+	makes it a fatal error otherwise); the system one under an applet */
+	if (type == AppletType_Application || type == AppletType_SystemApplication)
+	{
+		ErrorApplicationConfig config;
+
+		if (R_FAILED(errorApplicationCreate(&config, message, NULL)))
+			return 0;
+		return R_SUCCEEDED(errorApplicationShow(&config));
+	}
+	else
+	{
+		ErrorSystemConfig config;
+
+		if (R_FAILED(errorSystemCreate(&config, message, NULL)))
+			return 0;
+		return R_SUCCEEDED(errorSystemShow(&config));
+	}
+}
+
+void host_fatal(const char *format, ...)
+{
+	char message[1024];
+	va_list arguments;
+
+	va_start(arguments, format);
+	vsnprintf(message, sizeof(message), format, arguments);
+	va_end(arguments);
+	host_log(HOST_LOG_ERROR, message);
+	host_show_error(message);
+	leave(1);
+}
+
+void host_abort(const char *reason)
+{
+	host_fatal("The game stopped (%s). The log is in " SWITCH_DATA_ROOT "/host.txt and debug.txt.", reason);
 }
 
 void host_exit(int code)
@@ -726,8 +729,6 @@ static void start_watchdog(void)
 
 	if (R_FAILED(threadCreate(&thread, watchdog, NULL, NULL, 0x4000, 0x2c, -2)) || R_FAILED(threadStart(&thread)))
 		host_logf(HOST_LOG_WARN, "no frame watchdog");
-	if (thread.handle)
-		host_thread_register(thread.handle);
 }
 
 /* ---------- main */
@@ -818,19 +819,13 @@ int main(int argc, char *argv[])
 	boot_block = make_boot(&environment);
 	host_memory_describe();
 
-	main_thread_of_process = threadGetCurHandle();
-	ueventCreate(&exit_event, false);
 	start_watchdog();
 	host_profile_start();
 	host_logf(HOST_LOG_INFO, "starting the game thread");
 	if (host_native_thread_create(game_main, NULL, MAIN_STACK_SIZE, "game") != 0)
 		host_fatal("cannot start the game thread");
-	/* the game ends the process (host_exit): this thread leaves then; SDL
-	handles the applet's messages on the game's thread */
+	/* the game ends the process itself (host_exit); SDL handles the
+	applet's messages on the game's thread */
 	for (;;)
-	{
-		waitSingle(waiterForUEvent(&exit_event), UINT64_MAX);
-		if (exit_requested)
-			finish(exit_code);
-	}
+		svcSleepThread(1000000000LL);
 }
