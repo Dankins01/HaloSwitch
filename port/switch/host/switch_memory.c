@@ -389,14 +389,76 @@ int host_image_map(void *backing, const uint8_t *page_permissions)
 	return 0;
 }
 
+
+/* a session to ourselves: a copied pseudo-handle arrives as a real handle */
+static Handle handle_server = INVALID_HANDLE;
+static Handle received_handle = INVALID_HANDLE;
+
+static void handle_server_thread(void *unused)
+{
+	(void)unused;
+	s32 index;
+	Handle session = handle_server;
+
+	u32 *tls = (u32 *)armGetTls();
+
+	if (R_SUCCEEDED(svcReplyAndReceive(&index, &session, 1, INVALID_HANDLE, UINT64_MAX)) &&
+		(tls[1] & (1u << 31)) && (tls[2] & 0x1e) == (1u << 1))
+		received_handle = tls[3];
+	/* the reply: an empty message */
+	tls[0] = 0;
+	tls[1] = 0;
+	svcReplyAndReceive(&index, &session, 0, session, 0);
+}
+
+static Handle own_process_handle(void)
+{
+	Handle client = INVALID_HANDLE;
+	Handle server = INVALID_HANDLE;
+	Handle result = INVALID_HANDLE;
+	Thread thread;
+	Result rc = svcCreateSession(&server, &client, 0, 0);
+
+	if (R_FAILED(rc))
+	{
+		host_logf(HOST_LOG_ERROR, "svcCreateSession failed: 0x%x", rc);
+		return INVALID_HANDLE;
+	}
+	handle_server = server;
+	rc = threadCreate(&thread, handle_server_thread, NULL, NULL, 0x4000, 0x2c, -2);
+	if (R_SUCCEEDED(rc))
+		rc = threadStart(&thread);
+	if (R_SUCCEEDED(rc))
+	{
+		u32 *tls = (u32 *)armGetTls();
+		/* type 4 (a request), no data; a handle descriptor with one copied handle */
+		tls[0] = 4;
+		tls[1] = 1u << 31;
+		tls[2] = 1u << 1;
+		tls[3] = CUR_PROCESS_HANDLE;
+		rc = svcSendSyncRequest(client);
+		threadWaitForExit(&thread);
+		threadClose(&thread);
+		result = received_handle;
+		if (result != INVALID_HANDLE)
+			host_logf(HOST_LOG_INFO, "process handle made: 0x%x", result);
+	}
+	if (R_FAILED(rc))
+		host_logf(HOST_LOG_ERROR, "making the process handle failed: 0x%x", rc);
+	svcCloseHandle(client);
+	svcCloseHandle(server);
+	return result;
+}
+
 int host_memory_initialize(uint32_t base, uint32_t size)
 {
 	mutexInit(&memory_lock);
 	process = envGetOwnProcessHandle();
-	/* an installed title has no loader to give it the handle: the kernel
-	takes the current process's pseudo-handle for these calls */
+	/* an installed title has no loader to give it the handle, and the
+	kernel refuses the pseudo-handle for these calls (0xe401): a real one is
+	made by sending the pseudo-handle to ourselves over a session */
 	if (process == INVALID_HANDLE)
-		process = CUR_PROCESS_HANDLE;
+		process = own_process_handle();
 	if (process == INVALID_HANDLE || !envIsSyscallHinted(0x73) || !envIsSyscallHinted(0x77))
 	{
 		host_logf(HOST_LOG_ERROR, "this homebrew loader gives no process handle or no code memory system calls; "
