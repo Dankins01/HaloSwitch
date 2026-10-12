@@ -1140,17 +1140,16 @@ static void platform_show_pending_message(void)
 /* ---------- events */
 
 /* quits as closing the window does, when the events are next read (the
-menus' Quit: port/linux/game/menu_functions.c); Android's menus have none,
-as the system closes its apps */
+menus' Quit: port/linux/game/menu_functions.c). Android's menus show no
+Quit (the system closes its apps), but the Switch runs the Android build's
+game, and its menus do: there it leaves to the Home menu */
 void platform_request_quit(void)
 {
-#ifndef HALO_ANDROID
 	SDL_Event event;
 
 	memset(&event, 0, sizeof(event));
 	event.type = SDL_EVENT_QUIT;
 	SDL_PushEvent(&event);
-#endif
 }
 
 void platform_scoreboard_scroll(int open, long *notches, long *pages)

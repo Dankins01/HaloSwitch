@@ -160,10 +160,32 @@ SDL_FunctionPointer SDL_GL_GetProcAddress(const char *name)
 
 /* ---------- events */
 
+/* events the game gives itself (the menus' Quit), before the host's */
+#define PUSHED_EVENTS 4
+static SDL_Event pushed_events[PUSHED_EVENTS];
+static int pushed_count;
+
+bool SDL_PushEvent(SDL_Event *event)
+{
+	if (!event || pushed_count == PUSHED_EVENTS)
+		return false;
+	pushed_events[pushed_count++] = *event;
+	return true;
+}
+
 bool SDL_PollEvent(SDL_Event *event)
 {
 	SDL_Event scratch;
 
+	if (pushed_count)
+	{
+		if (event)
+			*event = pushed_events[0];
+		for (int i = 1; i < pushed_count; i++)
+			pushed_events[i - 1] = pushed_events[i];
+		pushed_count--;
+		return true;
+	}
 	return host_sdl_poll_event(event ? event : &scratch) != 0;
 }
 
