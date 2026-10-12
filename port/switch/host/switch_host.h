@@ -103,6 +103,7 @@ write to a watched page, which is now writeable again */
 int host_memory_watch_fault(uint64_t address);
 /* a line of text describing the process's memory, for the log */
 void host_memory_describe(void);
+void host_memory_release(void); /* the guest's mappings undone, before leaving */
 
 /* ---------- the guest image (switch_loader.c) */
 

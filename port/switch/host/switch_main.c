@@ -24,6 +24,7 @@ SD card layout (port/switch/README.md):
 #include "switch_host.h"
 
 #include <switch.h>
+#include <SDL2/SDL.h>
 
 #include <dirent.h>
 #include <errno.h>
@@ -236,8 +237,7 @@ void host_logf(int priority, const char *format, ...)
 	host_log(priority, text);
 }
 
-/* ends the process: back to the Home menu (hbloader cannot reuse a process
-whose memory is mapped below 4 GB for the guest) */
+/* ends the process: back to the Home menu (or, from the homebrew menu, to it) */
 static void clocks_restore(void);
 static void leave(int code) __attribute__((noreturn));
 static void leave(int code)
@@ -252,8 +252,13 @@ static void leave(int code)
 		log_fd = -1;
 	}
 	mutexUnlock(&log_io_lock);
-	svcExitProcess();
-	__builtin_unreachable();
+	/* the normal way out (libnx's exit: the applet told, the services
+	closed): ended with svcExitProcess, the system said "The software was
+	closed because an error occurred". The audio (which runs the game's
+	code) stopped first, then the game's memory unmapped */
+	SDL_Quit();
+	host_memory_release();
+	exit(code);
 }
 
 int host_show_error(const char *message)
