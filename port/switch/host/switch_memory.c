@@ -450,6 +450,37 @@ static Handle own_process_handle(void)
 	return result;
 }
 
+
+/* Atmosphère's process manager hands out a process's handle
+(pm:dmnt AtmosphereGetProcessInfo, command 65000) */
+static Handle pm_process_handle(void)
+{
+	u64 pid = 0;
+	Handle handle = INVALID_HANDLE;
+	/* out: the program's location and its override status, unused */
+	struct { u8 location[16]; u8 status[16]; } info;
+	Result rc = svcGetProcessId(&pid, CUR_PROCESS_HANDLE);
+
+	if (R_SUCCEEDED(rc))
+		rc = pmdmntInitialize();
+	if (R_FAILED(rc))
+	{
+		host_logf(HOST_LOG_ERROR, "pm:dmnt: 0x%x", rc);
+		return INVALID_HANDLE;
+	}
+	rc = serviceDispatchInOut(pmdmntGetServiceSession(), 65000, pid, info,
+		.out_handle_attrs = { SfOutHandleAttr_HipcCopy },
+		.out_handles = &handle);
+	pmdmntExit();
+	if (R_FAILED(rc))
+	{
+		host_logf(HOST_LOG_ERROR, "pm:dmnt process info: 0x%x", rc);
+		return INVALID_HANDLE;
+	}
+	host_logf(HOST_LOG_INFO, "process handle from pm: 0x%x", handle);
+	return handle;
+}
+
 int host_memory_initialize(uint32_t base, uint32_t size)
 {
 	mutexInit(&memory_lock);
@@ -457,6 +488,8 @@ int host_memory_initialize(uint32_t base, uint32_t size)
 	/* an installed title has no loader to give it the handle, and the
 	kernel refuses the pseudo-handle for these calls (0xe401): a real one is
 	made by sending the pseudo-handle to ourselves over a session */
+	if (process == INVALID_HANDLE)
+		process = pm_process_handle();
 	if (process == INVALID_HANDLE)
 		process = own_process_handle();
 	if (process == INVALID_HANDLE || !envIsSyscallHinted(0x73) || !envIsSyscallHinted(0x77))
