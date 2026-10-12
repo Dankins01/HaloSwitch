@@ -252,10 +252,20 @@ static void leave(int code)
 		log_fd = -1;
 	}
 	mutexUnlock(&log_io_lock);
-	/* the applet's session closed first, as libnx's own exit does: the
-	system then sees the program leave, not fail ("The software was closed
-	because an error occurred"). Nothing else is undone: the process ends */
+	/* As an installed title, the way libnx's own exit leaves: appletExit
+	readies it and hands over an exit function, which tells the system the
+	application is leaving (ISelfController Exit) and waits to be ended. The
+	process ending itself instead (svcExitProcess) is what the system calls
+	"The software was closed because an error occurred". From the Homebrew
+	Menu (hbloader's process) it still just ends */
 	appletExit();
+	if (envIsNso())
+	{
+		LoaderReturnFn exit_function = envGetExitFuncPtr();
+
+		if (exit_function)
+			exit_function(code);
+	}
 	svcExitProcess();
 	__builtin_unreachable();
 }
