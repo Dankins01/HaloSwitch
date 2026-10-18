@@ -395,6 +395,8 @@ static short first_person_weapon_side= 0;
 #define FIRST_PERSON_STATE_INDEX(local_player_index) \
 	((short)((local_player_index)+(first_person_weapon_side ? MAXIMUM_NUMBER_OF_LOCAL_PLAYERS : 0)))
 long dual_wield_left_weapon(long unit_index);
+boolean weapon_tags_first_person_view(long weapon_definition_index, real_point3d const *camera_position,
+	real_vector3d const *camera_forward, real_vector3d const *camera_up, struct real_matrix4x3 *transform);
 void d3d8_port_mirror_winding(int mirrored);
 
 /* ---------- public code */
@@ -675,6 +677,16 @@ static void first_person_weapon_draw_side(
 	return;
 }
 
+static boolean first_person_weapon_state_reloading(
+	short state)
+{
+	return state==_first_person_weapon_state_reload_while_empty ||
+		state==_first_person_weapon_state_reload_while_full ||
+		state==_first_person_weapon_state_shotgun_enter_reload ||
+		state==_first_person_weapon_state_shotgun_exit_reload_empty ||
+		state==_first_person_weapon_state_shotgun_exit_reload_full;
+}
+
 void first_person_weapon_draw(
 	void)
 {
@@ -688,11 +700,21 @@ void first_person_weapon_draw(
 			first_person_weapons_left[render.local_player_index].weapon_index!=NONE &&
 			first_person_weapons_left[render.local_player_index].visible;
 
-		first_person_weapon_draw_side(unit_index, dual);
-		if (dual)
+		/* (a weapon being reloaded drawn with both hands, the other one
+		lowered out of sight meanwhile) */
+		short right_state= first_person_weapons[render.local_player_index].state;
+		short left_state= first_person_weapons_left[render.local_player_index].state;
+		boolean right_reloading= dual && first_person_weapon_state_reloading(right_state);
+		boolean left_reloading= dual && !right_reloading && first_person_weapon_state_reloading(left_state);
+
+		if (!left_reloading)
+		{
+			first_person_weapon_draw_side(unit_index, dual && !right_reloading);
+		}
+		if (dual && !right_reloading)
 		{
 			first_person_weapon_side= 1;
-			first_person_weapon_draw_side(unit_index, TRUE);
+			first_person_weapon_draw_side(unit_index, !left_reloading);
 			first_person_weapon_side= 0;
 		}
 	}
@@ -1571,6 +1593,25 @@ static void first_person_weapon_build_node_matrices(
 			&render.camera.position,
 			&render.camera.forward,
 			&render.camera.up);
+		/* port: a Halo 2 weapon's arms and weapon moved to where Halo 2
+		holds it (port/linux/game/weapon_tags.c) */
+		{
+			real_matrix4x3 view;
+
+			if (weapon_tags_first_person_view(weapon->definition_index, &render.camera.position,
+				&render.camera.forward, &render.camera.up, &view))
+			{
+				short node_index;
+
+				for (node_index= 0; node_index<MIN(animation_graph->nodes.count, MAXIMUM_NODES_PER_ANIMATION); node_index++)
+				{
+					real_matrix4x3 moved;
+
+					matrix4x3_multiply(&view, &first_person_weapon->node_matrices[node_index], &moved);
+					first_person_weapon->node_matrices[node_index]= moved;
+				}
+			}
+		}
 		/* the pose between the last two ticks (render_interpolation.c) */
 		/* port: no more nodes than the weapon's matrices hold (a map's count) */
 		render_interpolation_first_person(

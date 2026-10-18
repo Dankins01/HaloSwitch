@@ -3,7 +3,7 @@ DUAL_WIELD.C
 
 Halo 2's dual wielding, for a game on one machine. A player holding a
 one-handed weapon (the pistol, the plasma pistol, the needler, the plasma
-rifle) who holds the weapon switch (Y) over another takes it in the left
+rifle, Halo 2's SMG where it is held as the pistol is) who holds the weapon switch (Y) over another takes it in the left
 hand; tapping it there still switches weapons. With two, the grenade
 trigger fires the left one (no grenades are thrown, and there is no zoom),
 the action reloads both, and tapping the switch drops the left one. It is
@@ -32,6 +32,7 @@ each tick, so that a saved game brought back finds its left weapon again.
 #include "dual_wield.h"
 
 #include <string.h>
+#include <math.h>
 
 /* the platform layer's (port/linux/src) */
 void platform_log(char const *format, ...);
@@ -50,6 +51,7 @@ enum
 /* how near the player's feet the weapon to take lies (world units) */
 #define DUAL_WIELD_REACH 1.2f
 #define LEFT_HAND_MARKER "left hand"
+#define DUAL_WIELD_SMG "weapons\\h2 smg\\smg"
 
 /* the one-handed weapons */
 static char const *const dual_wield_weapons[] =
@@ -98,6 +100,14 @@ static boolean dual_wield_weapon(
 	{
 		if (!strcmp(name, dual_wield_weapons[index]))
 			return TRUE;
+	}
+	/* (Halo 2's SMG, where it is held as the pistol is: weapon_tags.c) */
+	if (!strcmp(name, DUAL_WIELD_SMG))
+	{
+		struct weapon_definition *definition = weapon_definition_get(weapon->definition_index);
+		long animations = definition->weapon.interface_definition.first_person_animations.index;
+
+		return animations != NONE && strstr(tag_get_name(animations), "pistol\\fp") != NULL;
 	}
 	return FALSE;
 }
@@ -376,4 +386,13 @@ long dual_wield_left_weapon(
 			return dual_wield[local_player_index].left_weapon_index;
 	}
 	return NONE;
+}
+
+/* whether a one-handed weapon emptied of its spare rounds stays on the
+ground, its magazine's still in it, to be taken in the left hand (weapons.c,
+as a weapon of its kind takes its rounds) */
+boolean dual_wield_weapon_stays(
+	long weapon_index)
+{
+	return dual_wield_active() && dual_wield_weapon(weapon_index);
 }

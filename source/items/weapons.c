@@ -1050,8 +1050,17 @@ boolean weapon_handle_potential_inventory_item(
 					if (weapon_definition->weapon.pickup_sound.index!=NONE && local_player_index!=NONE)
 						unspatialized_impulse_sound_new(weapon_definition->weapon.pickup_sound.index, 1.0f);
 
-					if (item_magazine->rounds_total==0)
-						object_delete(item_object_index);
+					/* port: a one-handed weapon with rounds in it stays, to
+					be taken in the left hand (port/linux/game/dual_wield.c) */
+					{
+						extern boolean dual_wield_weapon_stays(long weapon_index);
+
+						if (item_magazine->rounds_total==0 &&
+							!(item_magazine->rounds_loaded>0 && dual_wield_weapon_stays(item_object_index)))
+						{
+							object_delete(item_object_index);
+						}
+					}
 				}
 
 				handled = TRUE;
@@ -2395,11 +2404,22 @@ static void trigger_create_projectiles(
 					&forward,
 					trigger_definition->first_person_weapon_offset.x,
 					&origin);
-				point_from_line3d(
-					&origin,
-					&right,
-					trigger_definition->first_person_weapon_offset.y,
-					&origin);
+				/* port: a left hand's weapon's shots from the left, dual
+				wielding (port/linux/game/dual_wield.c) */
+				{
+					extern long dual_wield_left_weapon(long unit_index);
+					real offset_y = trigger_definition->first_person_weapon_offset.y;
+
+					if (dual_wield_left_weapon(owner_object_index)==weapon_index)
+					{
+						offset_y= -offset_y;
+					}
+					point_from_line3d(
+						&origin,
+						&right,
+						offset_y,
+						&origin);
+				}
 				point_from_line3d(
 					&origin,
 					&up,
@@ -3054,6 +3074,13 @@ boolean weapon_update(
 		weapon->weapon.state_timer--;
 	}
 
+	/* port: a burst weapon's trigger, its shots three at a time
+	(port/linux/game/weapon_tags.c) */
+	{
+		extern void weapon_tags_burst_control(long weapon_index, word *control_flags);
+
+		weapon_tags_burst_control(weapon_index, &weapon->weapon.control_flags);
+	}
 	if (!TEST_FLAG(weapon->weapon.control_flags, _weapon_control_user_busy_bit) && weapon->weapon.state_timer<=0)
 	{
 		triggers_down[0]= TEST_FLAG(weapon->weapon.control_flags, _weapon_control_primary_trigger_bit);

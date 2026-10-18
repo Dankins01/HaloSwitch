@@ -36,6 +36,9 @@ scenario_tags_unload, after the menus' tags.
 #include "game/game_globals.h"
 #include "items/projectile_definitions.h"
 #include "items/weapon_definitions.h"
+#include "items/weapons.h"
+#include "objects/objects.h"
+#include "objects/object_types.h"
 #include "math/real_math.h"
 #include "models/model_animation_definitions.h"
 #include "models/model_definitions.h"
@@ -52,6 +55,7 @@ scenario_tags_unload, after the menus' tags.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /* the platform layer's (port/linux/src) */
 void platform_log(char const *format, ...);
@@ -72,12 +76,16 @@ void rasterizer_triangle_buffer_delete(struct triangle_buffer *triangle_buffer);
 
 void weapon_tags_loaded(char const *map_name);
 void weapon_tags_unloaded(void);
+void weapon_tags_burst_control(long weapon_index, word *control_flags);
+boolean weapon_tags_first_person_view(long weapon_definition_index, real_point3d const *camera_position,
+	real_vector3d const *camera_forward, real_vector3d const *camera_up, real_matrix4x3 *transform);
+char const *config_string(char const *name);
 
 /* ---------- constants */
 
 #define PACK_NAME "h2weapons.pak"
 #define PACK_SIGNATURE "H2WP"
-#define PACK_VERSION 4
+#define PACK_VERSION 5
 #define PACK_TAG_NAME 64
 #define PACK_DISPLAY_NAME 32
 #define PACK_NODE_NAME 32
@@ -100,6 +108,10 @@ enum
 	MAXIMUM_PACK_TEXTURES = 256,
 	MAXIMUM_PACK_GEOMETRIES = 5,
 	MAXIMUM_PART_INDICES = 1L << 20,
+	/* the burst weapons fired at once (the players' and the AI's) */
+	MAXIMUM_BURST_WEAPONS = 32,
+	/* the pause between bursts (Halo 2's battle rifle's, 0.26 s) */
+	BURST_PAUSE_TICKS = 8,
 	NUMBER_OF_DETAIL_LEVELS = 5,
 	/* the tags a weapon adds besides its shaders and textures: itself, its
 	two models, a projectile and its damage effect for each of two
@@ -322,6 +334,9 @@ struct pack_weapon
 	real damage;
 	short kind;
 	real_vector3d first_person_offset;
+	short burst;
+	/* the first person moved (forward, left, up; yaw, pitch, roll) */
+	real view[6];
 	struct pack_model first_person;
 	struct pack_model third_person;
 };
@@ -349,6 +364,25 @@ static struct
 	boolean loaded;
 	/* (said once: there is no pack) */
 	boolean missing_logged;
+	/* the weapons made, by definition: their bursts and first-person views */
+	struct weapon_tags_special
+	{
+		long definition_index;
+		short burst;
+		real view[6];
+		real_point3d pivot;
+		char name[PACK_DISPLAY_NAME];
+	} specials[MAXIMUM_PACK_WEAPONS];
+	long special_count;
+	/* each firing burst weapon's (object): its shots and its pause */
+	struct weapon_tags_burst
+	{
+		long weapon_index;
+		long last_fired;
+		short shots;
+		short pause;
+		boolean firing;
+	} bursts[MAXIMUM_BURST_WEAPONS];
 } weapon_tags;
 
 /* the build under way */
@@ -568,10 +602,16 @@ static boolean pack_read(byte const *data, long size, struct pack_weapon **weapo
 		weapon->zoom = pack_real(&reader);
 		weapon->damage = pack_real(&reader);
 		weapon->kind = (short)pack_unsigned(&reader, 2);
-		pack_take(&reader, 2);
+		weapon->burst = (short)pack_unsigned(&reader, 2);
 		weapon->first_person_offset.i = pack_real(&reader);
 		weapon->first_person_offset.j = pack_real(&reader);
 		weapon->first_person_offset.k = pack_real(&reader);
+		{
+			short view_index;
+
+			for (view_index = 0; view_index < 6; view_index++)
+				weapon->view[view_index] = pack_real(&reader);
+		}
 		pack_model_read(&reader, &weapon->first_person);
 		pack_model_read(&reader, &weapon->third_person);
 	}
@@ -997,7 +1037,7 @@ first person as the animations' rest pose shows them, with each moving
 part bound where its node is then; else as the donor's bind pose shows
 them */
 static long model_build(struct pack_model const *source, long donor_index, long animations_index,
-	real_vector3d const *offset, char const *name)
+	real_vector3d const *offset, real_point3d *root_at_rest, char const *name)
 {
 	struct model const *donor = model_definition_get(donor_index);
 	struct model *model = allocate(sizeof(*model));
@@ -1040,6 +1080,8 @@ static long model_build(struct pack_model const *source, long donor_index, long 
 
 		rest_root = rest_pose_node(animations_index, rest_count, root_node->name);
 		has_rest = rest_root != NONE;
+		if (has_rest && root_at_rest)
+			*root_at_rest = rest[rest_root].position;
 	}
 	for (index = 0; index < source->node_count; index++)
 	{
@@ -1159,6 +1201,55 @@ static long model_build(struct pack_model const *source, long donor_index, long 
 	return tag_add(MODEL_TAG, donor_index, name, model);
 }
 
+/* ---------- bursts and views */
+
+/* config.toml's h2weapons.view: "name=forward,left,up,yaw,pitch,roll;..."
+(a weapon's tag's last name: "battle rifle", "smg"), for trying where a
+weapon is held without remaking the pack */
+static void weapon_view_override(
+	struct weapon_tags_special *special)
+{
+	char const *text = config_string("h2weapons.view");
+	size_t length = strlen(special->name);
+
+	while (text && *text)
+	{
+		char const *end = strchr(text, ';');
+		size_t piece = end ? (size_t)(end - text) : strlen(text);
+
+		while (*text == ' ')
+		{
+			text++;
+			piece--;
+		}
+		if (piece > length && !strncmp(text, special->name, length) && text[length] == '=')
+		{
+			real values[6];
+
+			if (sscanf(text + length + 1, "%f,%f,%f,%f,%f,%f", &values[0], &values[1], &values[2], &values[3],
+				&values[4], &values[5]) == 6)
+			{
+				memcpy(special->view, values, sizeof(values));
+				platform_log("h2 weapons: %s held as h2weapons.view says", special->name);
+			}
+		}
+		text = end ? end + 1 : NULL;
+	}
+}
+
+static struct weapon_tags_special *weapon_special(
+	long definition_index)
+{
+	long index;
+
+	for (index = 0; index < weapon_tags.special_count; index++)
+	{
+		if (weapon_tags.specials[index].definition_index == definition_index)
+			return &weapon_tags.specials[index];
+	}
+	return NULL;
+}
+
 /* ---------- weapons */
 
 /* a copy of a damage effect, its damage scaled */
@@ -1219,6 +1310,9 @@ static boolean weapon_build(struct pack_weapon const *source)
 	struct weapon_trigger_definition *triggers;
 	long first_person_index, third_person_index, index;
 	char name[PACK_TAG_NAME + 16];
+	real_point3d root_at_rest;
+
+	root_at_rest.x = root_at_rest.y = root_at_rest.z = 0.0f;
 
 	if (donor_index == NONE)
 		return FALSE;
@@ -1243,9 +1337,11 @@ static boolean weapon_build(struct pack_weapon const *source)
 	snprintf(name, sizeof(name), "%s fp", source->tag);
 	first_person_index = model_build(&source->first_person,
 		donor->weapon.interface_definition.first_person_model.index,
-		donor->weapon.interface_definition.first_person_animations.index, &source->first_person_offset, name);
+		donor->weapon.interface_definition.first_person_animations.index, &source->first_person_offset, &root_at_rest,
+		name);
 	third_person_index = first_person_index == NONE ? NONE :
-		model_build(&source->third_person, donor->object.model.index, NONE, &source->first_person_offset, source->tag);
+		model_build(&source->third_person, donor->object.model.index, NONE, &source->first_person_offset, NULL,
+			source->tag);
 	if (third_person_index == NONE)
 	{
 		build.failed = TRUE;
@@ -1341,7 +1437,24 @@ static boolean weapon_build(struct pack_weapon const *source)
 		weapon->weapon.zoom_magnification_minimum = source->zoom;
 		weapon->weapon.zoom_magnification_maximum = source->zoom;
 	}
-	return tag_add(WEAPON_TAG, donor_index, source->tag, weapon) != NONE;
+	index = tag_add(WEAPON_TAG, donor_index, source->tag, weapon);
+	if (index == NONE)
+		return FALSE;
+	/* (its burst and first-person view, which the weapon and first-person
+	code ask for) */
+	if (weapon_tags.special_count < MAXIMUM_PACK_WEAPONS)
+	{
+		struct weapon_tags_special *special = &weapon_tags.specials[weapon_tags.special_count++];
+		char const *short_name = strrchr(source->tag, '\\');
+
+		special->definition_index = index;
+		special->burst = source->burst;
+		memcpy(special->view, source->view, sizeof(special->view));
+		special->pivot = root_at_rest;
+		snprintf(special->name, sizeof(special->name), "%s", short_name ? short_name + 1 : source->tag);
+		weapon_view_override(special);
+	}
+	return TRUE;
 }
 
 static void weapon_tags_release(void)
@@ -1432,10 +1545,24 @@ void weapon_tags_loaded(
 		build.textures[index].tag_index = texture_build(&build.textures[index]);
 	for (index = 0; index < weapon_count && !build.failed; index++)
 	{
+		boolean later = FALSE;
+		long other;
+
+		/* (a weapon's first record its map has the donor of; a later one, a
+		fallback, only if none before it was built) */
+		if (tag_loaded(WEAPON_TAG, weapons[index].tag) != NONE)
+			continue;
+		for (other = index + 1; other < weapon_count; other++)
+			later |= !strcmp(weapons[other].tag, weapons[index].tag);
 		if (tag_loaded(WEAPON_TAG, weapons[index].donor) == NONE)
-			platform_log("h2 weapons: %s left out: the map has no %s", weapons[index].tag, weapons[index].donor);
+		{
+			if (!later)
+				platform_log("h2 weapons: %s left out: the map has none of its donors", weapons[index].tag);
+		}
 		else if (weapon_build(&weapons[index]))
+		{
 			made++;
+		}
 	}
 	if (build.failed)
 		goto failed;
@@ -1459,4 +1586,121 @@ void weapon_tags_unloaded(
 {
 	if (weapon_tags.loaded || weapon_tags.block_count)
 		weapon_tags_release();
+}
+
+/* a burst weapon's trigger (weapons.c's weapon_update, before the triggers
+are looked at): pulled, it fires its burst's shots, then lets go for a
+pause; held, it fires the next burst after it */
+void weapon_tags_burst_control(
+	long weapon_index,
+	word *control_flags)
+{
+	struct weapon_datum *weapon = weapon_get(weapon_index);
+	struct weapon_tags_special *special = weapon_special(weapon->definition_index);
+	boolean pulled = TEST_FLAG(*control_flags, _weapon_control_primary_trigger_bit);
+	long index, free_index = NONE;
+
+	if (!special || special->burst <= 0)
+		return;
+	for (index = 0; index < MAXIMUM_BURST_WEAPONS; index++)
+	{
+		if (weapon_tags.bursts[index].weapon_index == weapon_index)
+			break;
+		if (free_index == NONE && (weapon_tags.bursts[index].weapon_index == 0 ||
+			weapon_tags.bursts[index].weapon_index == NONE ||
+			!object_try_and_get_and_verify_type(weapon_tags.bursts[index].weapon_index, _object_mask_weapon)))
+		{
+			free_index = index;
+		}
+	}
+	if (index == MAXIMUM_BURST_WEAPONS)
+	{
+		if (free_index == NONE || !pulled)
+			return;
+		index = free_index;
+		memset(&weapon_tags.bursts[index], 0, sizeof(weapon_tags.bursts[index]));
+		weapon_tags.bursts[index].weapon_index = weapon_index;
+		weapon_tags.bursts[index].last_fired = weapon->weapon.game_time_last_fired;
+	}
+	{
+		struct weapon_tags_burst *burst = &weapon_tags.bursts[index];
+
+		if (weapon->weapon.game_time_last_fired != burst->last_fired)
+		{
+			burst->last_fired = weapon->weapon.game_time_last_fired;
+			burst->shots++;
+		}
+		if (burst->firing && (burst->shots >= special->burst || weapon->weapon.magazines[0].rounds_loaded <= 0))
+		{
+			burst->firing = FALSE;
+			burst->pause = BURST_PAUSE_TICKS;
+		}
+		if (!burst->firing)
+		{
+			if (burst->pause > 0)
+				burst->pause--;
+			else if (pulled)
+			{
+				burst->firing = TRUE;
+				burst->shots = 0;
+			}
+		}
+		SET_FLAG(*control_flags, _weapon_control_primary_trigger_bit, burst->firing);
+	}
+}
+
+/* the first person of a weapon held where Halo 2 holds it: the move of
+the arms and weapon, in the world, about the weapon's root (first_person_
+weapons.c); FALSE for any other */
+boolean weapon_tags_first_person_view(
+	long weapon_definition_index,
+	real_point3d const *camera_position,
+	real_vector3d const *camera_forward,
+	real_vector3d const *camera_up,
+	real_matrix4x3 *transform)
+{
+	struct weapon_tags_special *special = weapon_special(weapon_definition_index);
+	real_matrix4x3 camera, camera_inverse, view, about, moved, rotation;
+	long index;
+	boolean any = FALSE;
+
+	if (!special)
+		return FALSE;
+	for (index = 0; index < 6; index++)
+		any |= special->view[index] != 0.0f;
+	if (!any)
+		return FALSE;
+	/* (in the camera's space: forward x, left y, up z) */
+	matrix4x3_from_point_and_vectors(&camera, camera_position, camera_forward, camera_up);
+	matrix4x3_inverse(&camera, &camera_inverse);
+	/* yaw about up, then pitch about left (forward down), then roll about
+	forward */
+	{
+		real yaw = special->view[3] * (real)M_PI / 180.0f, pitch = special->view[4] * (real)M_PI / 180.0f,
+			roll = special->view[5] * (real)M_PI / 180.0f;
+		real cy = (real)cos(yaw), sy = (real)sin(yaw), cp = (real)cos(pitch), sp = (real)sin(pitch),
+			cr = (real)cos(roll), sr = (real)sin(roll);
+		/* R = Rz(yaw) Ry(pitch) Rx(roll), columns: where forward, left and up go */
+		real r[3][3];
+
+		r[0][0] = cy * cp; r[0][1] = cy * sp * sr - sy * cr; r[0][2] = cy * sp * cr + sy * sr;
+		r[1][0] = sy * cp; r[1][1] = sy * sp * sr + cy * cr; r[1][2] = sy * sp * cr - cy * sr;
+		r[2][0] = -sp; r[2][1] = cp * sr; r[2][2] = cp * cr;
+		matrix4x3_identity(&rotation);
+		rotation.forward.i = r[0][0]; rotation.forward.j = r[1][0]; rotation.forward.k = r[2][0];
+		rotation.left.i = r[0][1]; rotation.left.j = r[1][1]; rotation.left.k = r[2][1];
+		rotation.up.i = r[0][2]; rotation.up.j = r[1][2]; rotation.up.k = r[2][2];
+	}
+	/* (about the root: moved to the origin, turned, moved back and on) */
+	matrix4x3_identity(&about);
+	about.position.x = -special->pivot.x;
+	about.position.y = -special->pivot.y;
+	about.position.z = -special->pivot.z;
+	matrix4x3_multiply(&rotation, &about, &moved);
+	moved.position.x += special->pivot.x + special->view[0];
+	moved.position.y += special->pivot.y + special->view[1];
+	moved.position.z += special->pivot.z + special->view[2];
+	matrix4x3_multiply(&moved, &camera_inverse, &view);
+	matrix4x3_multiply(&camera, &view, transform);
+	return TRUE;
 }

@@ -393,6 +393,11 @@ static const struct config_setting config_settings[] =
 		"Kill each survival wave this many seconds after it comes (tests); 0 never." },
 	{ "debug.survival_points", _config_integer, "0", "HALO_SURVIVAL_POINTS", _environment_value, _platform_all,
 		"The points a survival game starts with, for the shop's tests; 0 none." },
+	{ "h2weapons.view", _config_string, "\"\"", "HALO_H2WEAPONS_VIEW", _environment_value, _platform_all,
+		"Where the Halo 2 weapons (h2weapons.pak) are held in first person, for\n"
+		"trying it: \"name=forward,left,up,yaw,pitch,roll;...\" (a weapon's name\n"
+		"as \"battle rifle\" or \"smg\"; world units and degrees, the arms and\n"
+		"weapon moved together); empty for the pack's own." },
 	{ "debug.survival_wave", _config_integer, "0", "HALO_SURVIVAL_WAVE", _environment_value, _platform_all,
 		"The wave a survival game starts at, for tests of later waves; 0 the first." },
 	{ "debug.exit_after", _config_real, "0.0", "HALO_EXIT_AFTER", _environment_value, _platform_all,

@@ -229,19 +229,28 @@ made from your own copy of Halo 2 (the Xbox game's `shared.map` and
     python3 tools/h2_weapons.py PATH/TO/HALO2/MAPS h2weapons.pak
 
 Each is built on a Halo weapon of the level's (the assault rifle, the
-shotgun, the rocket launcher), whose animations, sounds and HUD it uses,
+pistol, the shotgun, the rocket launcher; failing the one it is meant for,
+another, with stats of its own: the shotgun on a level without Halo's is
+held as the assault rifle is), whose animations, sounds and HUD it uses,
 with Halo 2's models and textures and its own magazine, rate of fire,
-spread, zoom and damage. The sword is held as the plasma pistol is: its
-trigger strikes at arm's length and its melee is the Elites' sword's. A
-level without that weapon goes without it.
+spread, zoom and damage. The battle rifle fires three-round bursts; the SMG
+is held one-handed, as the pistol is, and dual wields. In first person the
+arms and weapon are moved to where Halo 2 holds it; `h2weapons.view` in
+config.toml tries another place (`"smg=forward,left,up,yaw,pitch,roll"`,
+world units and degrees, several separated by `;`). The sword is held as
+the plasma pistol is: its trigger strikes at arm's length and its melee is
+the Elites' sword's.
 
 Dual wielding, as Halo 2's (`port/linux/game/dual_wield.c`), in a game on
 one machine: holding a one-handed weapon (the pistol, the plasma pistol, the
-needler, the plasma rifle), hold the weapon switch (Y) over another to take
-it in the left hand; a tap still switches weapons. With two, the left
+needler, the plasma rifle, Halo 2's SMG), hold the weapon switch (Y) over
+another to take it in the left hand; a tap still switches weapons (one
+with rounds in its magazine is left on the ground for this when its spare
+rounds are taken). With two, the left
 trigger fires the left one (no grenades, no zoom), X reloads both, and
 tapping Y drops the left one. The left hand's is drawn in first person with
-the right hand's animations, mirrored.
+the right hand's animations, mirrored, its shots coming from the left; while
+one is reloaded it is drawn with both hands and the other is lowered.
 
 Network games have split screen too: up to 4 players on each computer. In
 the game lobby, another controller presses START to join, and the new

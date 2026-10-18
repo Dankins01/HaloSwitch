@@ -22,6 +22,9 @@ void dual_wield_input(short local_player_index, long unit_index, short switch_ti
 /* each tick, before the objects update (game.c) */
 void dual_wield_update(void);
 
+/* whether a one-handed weapon emptied of its spare rounds stays (weapons.c) */
+boolean dual_wield_weapon_stays(long weapon_index);
+
 /* the weapon in the unit's left hand; NONE: none */
 long dual_wield_left_weapon(long unit_index);
 

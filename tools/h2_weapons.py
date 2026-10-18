@@ -326,24 +326,48 @@ KIND_SWORD = 1
 # Halo 2's level above it: Halo 2's super low is left out
 LEVELS = (1, 2, 3, 4, 5)
 
+# each weapon's records, the first whose donor a map has built (a fallback
+# after it carries its own stats); the view: the whole first person (arms
+# and weapon) moved in the camera's space, about the weapon's root, to sit
+# where Halo 2 holds it (forward, left, up in world units; yaw, pitch, roll
+# in degrees)
+BR = {
+    "tag": "weapons\\h2 battle rifle\\battle rifle", "display": "BATTLE RIFLE",
+    "donor": "weapons\\assault rifle\\assault rifle",
+    "first_person": "objects\\weapons\\rifle\\battle_rifle\\fp_battle_rifle\\fp_battle_rifle",
+    "third_person": "objects\\weapons\\rifle\\battle_rifle\\battle_rifle",
+    # (Halo 2's: three-round bursts at 15 rounds a second, a burst every
+    # quarter second)
+    "magazine": 36, "maximum": 108, "rounds_per_second": 15.0, "projectiles_per_shot": 1, "rounds_per_shot": 1,
+    "burst": 3, "error": 0.2, "zoom": 2.0, "damage": 1.15,
+    "view": (-0.006, -0.004, 0.004, 0.0, 0.0, 0.0),
+}
+SMG = {
+    "tag": "weapons\\h2 smg\\smg", "display": "SMG",
+    # (one-handed, as Halo 2's: the pistol's hold, which dual wields)
+    "donor": "weapons\\pistol\\pistol",
+    "first_person": "objects\\weapons\\rifle\\smg\\fp_smg\\fp_smg",
+    "third_person": "objects\\weapons\\rifle\\smg\\smg",
+    "magazine": 60, "maximum": 240, "rounds_per_second": 15.0, "projectiles_per_shot": 1, "rounds_per_shot": 1,
+    "error": 1.0, "zoom": 0.0, "damage": 0.85,
+    # (to the right and out: Halo 2's lower-right hold, pointing in)
+    "view": (0.025, -0.04, 0.022, 0.0, -4.0, 0.0),
+}
+SHOTGUN = {
+    "tag": "weapons\\h2 shotgun\\shotgun", "display": "H2 SHOTGUN",
+    "donor": "weapons\\shotgun\\shotgun",
+    "first_person": "objects\\weapons\\rifle\\shotgun\\fp_shotgun\\fp_shotgun",
+    "third_person": "objects\\weapons\\rifle\\shotgun\\shotgun",
+    # (the donor's: 12 shells, its pellets)
+    "magazine": 0, "maximum": 0, "rounds_per_second": 0.0, "projectiles_per_shot": 0, "rounds_per_shot": 0,
+    "error": 1.0, "zoom": 0.0, "damage": 1.0,
+}
 WEAPONS = [
-    {
-        "tag": "weapons\\h2 battle rifle\\battle rifle", "display": "BATTLE RIFLE",
-        "donor": "weapons\\assault rifle\\assault rifle",
-        "first_person": "objects\\weapons\\rifle\\battle_rifle\\fp_battle_rifle\\fp_battle_rifle",
-        "third_person": "objects\\weapons\\rifle\\battle_rifle\\battle_rifle",
-        # (a three-round burst: three bullets a shot, three shots a second)
-        "magazine": 36, "maximum": 108, "rounds_per_second": 3.0, "projectiles_per_shot": 3, "rounds_per_shot": 3,
-        "error": 0.25, "zoom": 2.0, "damage": 1.6,
-    },
-    {
-        "tag": "weapons\\h2 smg\\smg", "display": "SMG",
-        "donor": "weapons\\assault rifle\\assault rifle",
-        "first_person": "objects\\weapons\\rifle\\smg\\fp_smg\\fp_smg",
-        "third_person": "objects\\weapons\\rifle\\smg\\smg",
-        "magazine": 60, "maximum": 240, "rounds_per_second": 15.0, "projectiles_per_shot": 1, "rounds_per_shot": 1,
-        "error": 1.4, "zoom": 0.0, "damage": 0.85,
-    },
+    BR,
+    SMG,
+    # (where the map has no pistol: the assault rifle's hold)
+    dict(SMG, donor="weapons\\assault rifle\\assault rifle", magazine=60, maximum=180,
+         view=(-0.03, 0.0, 0.04, 0.0, 0.0, 0.0)),
     {
         "tag": "weapons\\h2 rocket launcher\\rocket launcher", "display": "H2 ROCKET LAUNCHER",
         "donor": "weapons\\rocket launcher\\rocket launcher",
@@ -353,14 +377,13 @@ WEAPONS = [
         "magazine": 0, "maximum": 0, "rounds_per_second": 0.0, "projectiles_per_shot": 0, "rounds_per_shot": 0,
         "error": 1.0, "zoom": 2.0, "damage": 1.0,
     },
-    {
-        "tag": "weapons\\h2 shotgun\\shotgun", "display": "H2 SHOTGUN",
-        "donor": "weapons\\shotgun\\shotgun",
-        "first_person": "objects\\weapons\\rifle\\shotgun\\fp_shotgun\\fp_shotgun",
-        "third_person": "objects\\weapons\\rifle\\shotgun\\shotgun",
-        "magazine": 0, "maximum": 0, "rounds_per_second": 0.0, "projectiles_per_shot": 0, "rounds_per_shot": 0,
-        "error": 1.0, "zoom": 0.0, "damage": 1.0,
-    },
+    SHOTGUN,
+    # (where the map has no shotgun: the assault rifle's hold, the shotgun's
+    # magazine and spread made of its bullets)
+    dict(SHOTGUN, donor="weapons\\assault rifle\\assault rifle", magazine=12, maximum=48, rounds_per_second=1.1,
+         projectiles_per_shot=15, rounds_per_shot=1, error=9.0, damage=0.55,
+         # (its pump in the rifle's left hand)
+         first_person_offset=(0.03, 0.0, 0.025), view=(-0.01, -0.01, -0.005, 0.0, 0.0, 0.0)),
     {
         # (built on the plasma pistol, held as it is: its swing a short-range
         # strike, its melee the Elites' sword's: weapon_tags.c)
@@ -376,7 +399,7 @@ WEAPONS = [
 
 
 # (weapon_tags.c reads this version)
-PACK_VERSION = 4
+PACK_VERSION = 5
 
 
 def name_bytes(text, size):
@@ -454,15 +477,20 @@ def build(folder, output):
     maps = H2Maps(folder)
     textures = {}
     records = []
+    built = {}
     for weapon in WEAPONS:
-        fp = model_record(maps, weapon["first_person"], textures)
-        tp = model_record(maps, weapon["third_person"], textures)
+        for key in ("first_person", "third_person"):
+            if weapon[key] not in built:
+                built[weapon[key]] = model_record(maps, weapon[key], textures)
+        fp, tp = built[weapon["first_person"]], built[weapon["third_person"]]
         records.append(name_bytes(weapon["tag"], 64) + name_bytes(weapon["donor"], 64) +
                        name_bytes(weapon["display"], 32) +
                        struct.pack("<hhfhhfff", weapon["magazine"], weapon["maximum"], weapon["rounds_per_second"],
                                    weapon["projectiles_per_shot"], weapon["rounds_per_shot"], weapon["error"],
                                    weapon["zoom"], weapon["damage"]) +
-                       struct.pack("<HH3f", weapon.get("kind", KIND_GUN), 0, *weapon.get("first_person_offset", (0.0, 0.0, 0.0))) +
+                       struct.pack("<HH3f", weapon.get("kind", KIND_GUN), weapon.get("burst", 0),
+                                   *weapon.get("first_person_offset", (0.0, 0.0, 0.0))) +
+                       struct.pack("<6f", *weapon.get("view", (0.0,) * 6)) +
                        fp + tp)
     texture_records = []
     for name, _ in sorted(textures.items(), key=lambda item: item[1]):
