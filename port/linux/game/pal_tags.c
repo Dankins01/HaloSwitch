@@ -153,7 +153,7 @@ static struct
 		short animation_index;
 		short frame_index;
 		real fraction;
-	} advancing[MAXIMUM_LOCAL_PLAYERS];
+	} advancing[2 * MAXIMUM_LOCAL_PLAYERS]; /* (and the left hands', dual wielding) */
 } pal_tags;
 
 /* ---------- private code */
@@ -373,7 +373,7 @@ void pal_tags_loaded(
 	csmemset(&pal_tags, 0, sizeof(pal_tags));
 	for (index = 0; index < NUMBEROF(pal_tags.first_person_graphs); index++)
 		pal_tags.first_person_graphs[index] = NONE;
-	for (index = 0; index < MAXIMUM_LOCAL_PLAYERS; index++)
+	for (index = 0; index < NUMBEROF(pal_tags.advancing); index++)
 		pal_tags.advancing[index].graph_index = NONE;
 	region = cache_files_build_region(build);
 	if (!region || strcmp(region, "PAL"))
@@ -413,7 +413,7 @@ boolean pal_tags_first_person_advance(
 {
 	short index;
 
-	if (local_player_index < 0 || local_player_index >= MAXIMUM_LOCAL_PLAYERS)
+	if (local_player_index < 0 || local_player_index >= (short)NUMBEROF(pal_tags.advancing))
 		return TRUE;
 	/* (another animation, or this one again from its start; not a state
 	holding its last frame, first_person_weapon_next_state) */
@@ -447,7 +447,7 @@ real pal_tags_first_person_fraction(
 	short animation_index,
 	short frame_index)
 {
-	if (local_player_index < 0 || local_player_index >= MAXIMUM_LOCAL_PLAYERS ||
+	if (local_player_index < 0 || local_player_index >= (short)NUMBEROF(pal_tags.advancing) ||
 		pal_tags.advancing[local_player_index].graph_index != graph_index ||
 		pal_tags.advancing[local_player_index].animation_index != animation_index ||
 		frame_index < pal_tags.advancing[local_player_index].frame_index ||

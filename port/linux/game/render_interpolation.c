@@ -143,7 +143,9 @@ struct interpolated_first_person
 
 static struct interpolated_object *interpolated_objects;
 static struct interpolated_camera interpolated_cameras[MAXIMUM_LOCAL_PLAYERS];
-static struct interpolated_first_person interpolated_first_person[MAXIMUM_LOCAL_PLAYERS];
+/* (each local player's, then the left hands' when dual wielding:
+first_person_weapons.c) */
+static struct interpolated_first_person interpolated_first_person[2 * MAXIMUM_LOCAL_PLAYERS];
 static long interpolation_tick;
 static long interpolation_frame;
 static boolean interpolation_rendering;
@@ -489,7 +491,7 @@ void render_interpolation_reset(void)
 			interpolated_objects[index].object_index = NONE;
 	}
 	memset(interpolated_cameras, 0, sizeof(interpolated_cameras));
-	for (index = 0; index < MAXIMUM_LOCAL_PLAYERS; index++)
+	for (index = 0; index < NUMBEROF(interpolated_first_person); index++)
 	{
 		interpolated_first_person[index].node_count = 0;
 		interpolated_first_person[index].has_previous = FALSE;
@@ -823,7 +825,7 @@ void render_interpolation_first_person(
 	short node_index;
 
 	if (!interpolation_rendering ||
-		local_player_index < 0 || local_player_index >= MAXIMUM_LOCAL_PLAYERS ||
+		local_player_index < 0 || local_player_index >= (short)NUMBEROF(interpolated_first_person) ||
 		node_count <= 0 || node_count > MAXIMUM_INTERPOLATED_NODES)
 	{
 		return;

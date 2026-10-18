@@ -235,6 +235,14 @@ spread, zoom and damage. The sword is held as the plasma pistol is: its
 trigger strikes at arm's length and its melee is the Elites' sword's. A
 level without that weapon goes without it.
 
+Dual wielding, as Halo 2's (`port/linux/game/dual_wield.c`), in a game on
+one machine: holding a one-handed weapon (the pistol, the plasma pistol, the
+needler, the plasma rifle), hold the weapon switch (Y) over another to take
+it in the left hand; a tap still switches weapons. With two, the left
+trigger fires the left one (no grenades, no zoom), X reloads both, and
+tapping Y drops the left one. The left hand's is drawn in first person with
+the right hand's animations, mirrored.
+
 Network games have split screen too: up to 4 players on each computer. In
 the game lobby, another controller presses START to join, and the new
 player's profile is chosen on the ADD PLAYER screen that opens (with any

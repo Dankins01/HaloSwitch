@@ -3146,6 +3146,15 @@ static GLenum blend_equation(DWORD operation)
 	}
 }
 
+/* the winding the other way round, for a model drawn mirrored (the left
+hand's weapon in first person: first_person_weapons.c); none by default */
+static BOOL mirror_winding;
+
+void d3d8_port_mirror_winding(int mirrored)
+{
+	mirror_winding = mirrored != 0;
+}
+
 static void apply_raster_state(BOOL has_depth)
 {
 	DWORD *rs = D3D__RenderState;
@@ -3268,7 +3277,8 @@ static void apply_raster_state(BOOL has_depth)
 	}
 
 	/* the cull mode names the winding to discard; FRONTFACE names the
-	front winding */
+	front winding (the other way round while a mirrored model is drawn:
+	d3d8_port_mirror_winding) */
 	state_enable(&gl_state.cull_face, GL_CULL_FACE, rs[D3DRS_CULLMODE] != D3DCULL_NONE);
 	if (rs[D3DRS_CULLMODE] != D3DCULL_NONE)
 	{
@@ -3281,6 +3291,8 @@ static void apply_raster_state(BOOL has_depth)
 #endif
 		GLenum cull_mode = rs[D3DRS_CULLMODE] == rs[D3DRS_FRONTFACE] ? GL_FRONT : GL_BACK;
 
+		if (mirror_winding)
+			front_face = front_face == GL_CCW ? GL_CW : GL_CCW;
 		if (gl_state.front_face != front_face)
 		{
 			gl_state.front_face = front_face;

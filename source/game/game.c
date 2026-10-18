@@ -182,6 +182,7 @@ struct game_options;
 #include "units/vehicles.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
 #include "survival.h" /* port: port/linux/game/survival.c */
+#include "dual_wield.h" /* port: port/linux/game/dual_wield.c */
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
@@ -356,6 +357,8 @@ void game_tick(
 	if (!(network_game_distributed_client() && network_coop_active()))
 		hs_update();
 	survival_update();
+	/* port: the left hand's weapon's triggers, before the objects update */
+	dual_wield_update();
 	recorded_animations_update();
 	objects_update();
 	players_update_after_game();
@@ -619,6 +622,7 @@ void game_initialize_for_new_map(
 	/* port: a survival game (port/linux/game/survival.c) runs none of the
 	level's scripts and places none of its actors */
 	place_actors = survival_initialize_for_new_map(game_globals->options.map_name);
+	dual_wield_initialize_for_new_map();
 	game_engine_dispose();
 	game_engine_initialize(&game_variant_global);
 	real_math_reset_precision();
@@ -873,6 +877,7 @@ void game_dispose_from_old_map(
 	void)
 {
 	survival_dispose_from_old_map();
+	dual_wield_dispose_from_old_map();
 	rasterizer_dispose_from_old_map();
 	game_state_dispose_from_old_map();
 	cheats_dispose_from_old_map();

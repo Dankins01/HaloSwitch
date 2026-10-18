@@ -385,6 +385,18 @@ real pal_tags_first_person_fraction(short local_player_index, long graph_index, 
 
 static struct first_person_weapon *first_person_weapons;
 
+/* port: dual wielding (port/linux/game/dual_wield.c): the left hand's
+weapon's first person, its own state, drawn mirrored (the right hand's
+animations on the left); which of the two the code works on now, and the
+index its per-player state elsewhere goes by (render_interpolation.c,
+pal_tags.c: the left hands' after the right's) */
+static struct first_person_weapon first_person_weapons_left[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS];
+static short first_person_weapon_side= 0;
+#define FIRST_PERSON_STATE_INDEX(local_player_index) \
+	((short)((local_player_index)+(first_person_weapon_side ? MAXIMUM_NUMBER_OF_LOCAL_PLAYERS : 0)))
+long dual_wield_left_weapon(long unit_index);
+void d3d8_port_mirror_winding(int mirrored);
+
 /* ---------- public code */
 
 short animation_update_render_only(
@@ -434,6 +446,15 @@ void first_person_weapons_initialize_for_new_map(
 		first_person_weapons[local_player_index].unit_index= NONE;
 		first_person_weapons[local_player_index].current_sound_index= NONE;
 		first_person_weapons[local_player_index].current_sound_state= NONE;
+		/* port: the left hand's (dual wielding) */
+		csmemset(
+			&first_person_weapons_left[local_player_index],
+			0,
+			sizeof(first_person_weapons_left[local_player_index]));
+		first_person_weapons_left[local_player_index].unit_index= NONE;
+		first_person_weapons_left[local_player_index].weapon_index= NONE;
+		first_person_weapons_left[local_player_index].current_sound_index= NONE;
+		first_person_weapons_left[local_player_index].current_sound_state= NONE;
 	}
 
 	return;
@@ -463,106 +484,216 @@ long first_person_weapon_get_local_index(
 	return (local_player_index==MAXIMUM_NUMBER_OF_LOCAL_PLAYERS) ? NONE : local_player_index;
 }
 
+/* port: dual wielding's: the matrices mirrored across the camera's
+upright plane (the left hand's weapon, drawn with the right hand's
+animations), and the off hand's arm folded away to nothing (each hand
+holds its own weapon) */
+static void first_person_weapon_mirror_matrices(
+	struct real_matrix4x3 *matrices,
+	short count)
+{
+	real_vector3d left;
+	short index;
+
+	cross_product3d(&render.camera.up, &render.camera.forward, &left);
+	if (normalize3d(&left)==0.0f)
+	{
+		return;
+	}
+	for (index= 0; index<count; index++)
+	{
+		struct real_matrix4x3 *matrix= &matrices[index];
+		real_vector3d *axes[3];
+		real offset;
+		short axis;
+
+		axes[0]= &matrix->forward;
+		axes[1]= &matrix->left;
+		axes[2]= &matrix->up;
+		for (axis= 0; axis<3; axis++)
+		{
+			real along= dot_product3d(axes[axis], &left);
+
+			axes[axis]->i-= 2.0f*along*left.i;
+			axes[axis]->j-= 2.0f*along*left.j;
+			axes[axis]->k-= 2.0f*along*left.k;
+		}
+		offset= (matrix->position.x-render.camera.position.x)*left.i+
+			(matrix->position.y-render.camera.position.y)*left.j+
+			(matrix->position.z-render.camera.position.z)*left.k;
+		matrix->position.x-= 2.0f*offset*left.i;
+		matrix->position.y-= 2.0f*offset*left.j;
+		matrix->position.z-= 2.0f*offset*left.k;
+	}
+
+	return;
+}
+
+static void first_person_weapon_fold_off_hand(
+	long hands_model_index,
+	struct real_matrix4x3 *matrices)
+{
+	struct model *model= model_definition_get(hands_model_index);
+	short index;
+
+	for (index= 0; index<MIN(model->nodes.count, MAXIMUM_NODES_PER_ANIMATION); index++)
+	{
+		struct model_node *node= TAG_BLOCK_GET_ELEMENT(&model->nodes, index, struct model_node);
+
+		if (!strncmp(node->name, "frame l ", 8))
+		{
+			matrices[index].forward= *global_zero_vector3d;
+			matrices[index].left= *global_zero_vector3d;
+			matrices[index].up= *global_zero_vector3d;
+		}
+	}
+
+	return;
+}
+
+static void first_person_weapon_draw_side(
+	long unit_index,
+	boolean dual)
+{
+	struct first_person_weapon *first_person_weapon= first_person_weapon_get(render.local_player_index);
+	boolean mirrored= first_person_weapon_side!=0;
+
+	if (unit_index!=NONE &&
+		first_person_weapon->visible &&
+		first_person_weapon->unit_index!=NONE &&
+		first_person_weapon->weapon_index!=NONE)
+	{
+		struct unit_datum *unit= unit_get(unit_index);
+		struct weapon_datum *weapon= weapon_get(first_person_weapon->weapon_index);
+		struct weapon_definition *weapon_definition= weapon_definition_get(weapon->definition_index);
+
+		if (weapon_definition->weapon.interface_definition.first_person_animations.index!=NONE)
+		{
+			struct real_matrix4x3 model_node_matrices[MAXIMUM_NODES_PER_ANIMATION];
+			struct render_model_effect model_effect;
+			struct game_globals_first_person_interface *first_person_interface=
+				TAG_BLOCK_GET_ELEMENT(
+					&scenario_get_game_globals()->first_person_interface,
+					0,
+					struct game_globals_first_person_interface);
+			struct render_lighting *lighting= object_get_cached_render_lighting(unit_index, FLT_MAX);
+
+			model_effect.modifier_shader= NULL;
+			if (TEST_FLAG(unit->unit.flags, _unit_active_camouflaged_bit) ||
+				unit->unit.active_camouflage>0.0f)
+			{
+				model_effect.type= _render_model_effect_type_active_camouflage;
+				model_effect.intensity= unit->unit.active_camouflage;
+				model_effect.parameter= unit->unit.active_camouflage_super_amount;
+				model_effect.source_object_index= unit_index;
+				model_effect.source_object_centroid= render.camera.position;
+			}
+			else
+			{
+				model_effect.type= _render_model_effect_type_none;
+			}
+
+			if (mirrored)
+			{
+				d3d8_port_mirror_winding(TRUE);
+			}
+			if (first_person_weapon->weapon_node_remapping_table_valid &&
+				weapon_definition->weapon.interface_definition.first_person_model.index!=NONE)
+			{
+				model_remap_node_matrices_to_match_animation_graph(
+					weapon_definition->weapon.interface_definition.first_person_model.index,
+					model_node_matrices,
+					weapon_definition->weapon.interface_definition.first_person_animations.index,
+					first_person_weapon->node_matrices,
+					first_person_weapon->weapon_node_remapping_table);
+				if (mirrored)
+				{
+					first_person_weapon_mirror_matrices(
+						model_node_matrices,
+						(short)MIN(model_definition_get(
+							weapon_definition->weapon.interface_definition.first_person_model.index)->nodes.count,
+							MAXIMUM_NODES_PER_ANIMATION));
+				}
+				render_model(
+					weapon_definition->weapon.interface_definition.first_person_model.index,
+					0.0f,
+					model_node_matrices,
+					NULL,
+					weapon->object.outgoing_change_colors,
+					weapon->object.outgoing_function_values,
+					lighting,
+					&render.camera.position,
+					0.0f,
+					&model_effect,
+					first_person_weapon->weapon_index,
+					0,
+					FLAG(_render_model_first_person_bit));
+			}
+
+			if (first_person_weapon->hands_node_remapping_table_valid &&
+				first_person_interface->hands.index!=NONE)
+			{
+				model_remap_node_matrices_to_match_animation_graph(
+					first_person_interface->hands.index,
+					model_node_matrices,
+					weapon_definition->weapon.interface_definition.first_person_animations.index,
+					first_person_weapon->node_matrices,
+					first_person_weapon->hands_node_remapping_table);
+				if (dual)
+				{
+					first_person_weapon_fold_off_hand(first_person_interface->hands.index, model_node_matrices);
+				}
+				if (mirrored)
+				{
+					first_person_weapon_mirror_matrices(
+						model_node_matrices,
+						(short)MIN(model_definition_get(first_person_interface->hands.index)->nodes.count,
+							MAXIMUM_NODES_PER_ANIMATION));
+				}
+				render_model(
+					first_person_interface->hands.index,
+					0.0f,
+					model_node_matrices,
+					NULL,
+					unit->object.outgoing_change_colors,
+					unit->object.outgoing_function_values,
+					lighting,
+					&render.camera.position,
+					0.0f,
+					&model_effect,
+					first_person_weapon->weapon_index,
+					0,
+					FLAG(_render_model_first_person_bit));
+			}
+			if (mirrored)
+			{
+				d3d8_port_mirror_winding(FALSE);
+			}
+		}
+	}
+
+	return;
+}
+
 void first_person_weapon_draw(
 	void)
 {
-	if (render.local_player_index!=NONE)
+	if (render.local_player_index!=NONE &&
+		local_player_get_player_index(render.local_player_index)!=NONE)
 	{
-		struct first_person_weapon *first_person_weapon= first_person_weapon_get(render.local_player_index);
+		long unit_index= player_get(
+			local_player_get_player_index(render.local_player_index))->unit_index;
+		/* port: and the left hand's weapon, dual wielding */
+		boolean dual= unit_index!=NONE && dual_wield_left_weapon(unit_index)!=NONE &&
+			first_person_weapons_left[render.local_player_index].weapon_index!=NONE &&
+			first_person_weapons_left[render.local_player_index].visible;
 
-		if (local_player_get_player_index(render.local_player_index)!=NONE)
+		first_person_weapon_draw_side(unit_index, dual);
+		if (dual)
 		{
-			long unit_index= player_get(
-				local_player_get_player_index(render.local_player_index))->unit_index;
-
-			if (unit_index!=NONE &&
-				first_person_weapon->visible &&
-				first_person_weapon->unit_index!=NONE &&
-				first_person_weapon->weapon_index!=NONE)
-			{
-				struct unit_datum *unit= unit_get(unit_index);
-				struct weapon_datum *weapon= weapon_get(first_person_weapon->weapon_index);
-				struct weapon_definition *weapon_definition= weapon_definition_get(weapon->definition_index);
-
-				if (weapon_definition->weapon.interface_definition.first_person_animations.index!=NONE)
-				{
-					struct real_matrix4x3 model_node_matrices[MAXIMUM_NODES_PER_ANIMATION];
-					struct render_model_effect model_effect;
-					struct game_globals_first_person_interface *first_person_interface=
-						TAG_BLOCK_GET_ELEMENT(
-							&scenario_get_game_globals()->first_person_interface,
-							0,
-							struct game_globals_first_person_interface);
-					struct animation_graph *animation_graph= animation_graph_definition_get(
-						weapon_definition->weapon.interface_definition.first_person_animations.index);
-					struct render_lighting *lighting= object_get_cached_render_lighting(unit_index, FLT_MAX);
-
-					model_effect.modifier_shader= NULL;
-					if (TEST_FLAG(unit->unit.flags, _unit_active_camouflaged_bit) ||
-						unit->unit.active_camouflage>0.0f)
-					{
-						model_effect.type= _render_model_effect_type_active_camouflage;
-						model_effect.intensity= unit->unit.active_camouflage;
-						model_effect.parameter= unit->unit.active_camouflage_super_amount;
-						model_effect.source_object_index= unit_index;
-						model_effect.source_object_centroid= render.camera.position;
-					}
-					else
-					{
-						model_effect.type= _render_model_effect_type_none;
-					}
-
-					if (first_person_weapon->weapon_node_remapping_table_valid &&
-						weapon_definition->weapon.interface_definition.first_person_model.index!=NONE)
-					{
-						model_remap_node_matrices_to_match_animation_graph(
-							weapon_definition->weapon.interface_definition.first_person_model.index,
-							model_node_matrices,
-							weapon_definition->weapon.interface_definition.first_person_animations.index,
-							first_person_weapon->node_matrices,
-							first_person_weapon->weapon_node_remapping_table);
-						render_model(
-							weapon_definition->weapon.interface_definition.first_person_model.index,
-							0.0f,
-							model_node_matrices,
-							NULL,
-							weapon->object.outgoing_change_colors,
-							weapon->object.outgoing_function_values,
-							lighting,
-							&render.camera.position,
-							0.0f,
-							&model_effect,
-							first_person_weapon->weapon_index,
-							0,
-							FLAG(_render_model_first_person_bit));
-					}
-
-					if (first_person_weapon->hands_node_remapping_table_valid &&
-						first_person_interface->hands.index!=NONE)
-					{
-						model_remap_node_matrices_to_match_animation_graph(
-							first_person_interface->hands.index,
-							model_node_matrices,
-							weapon_definition->weapon.interface_definition.first_person_animations.index,
-							first_person_weapon->node_matrices,
-							first_person_weapon->hands_node_remapping_table);
-						render_model(
-							first_person_interface->hands.index,
-							0.0f,
-							model_node_matrices,
-							NULL,
-							unit->object.outgoing_change_colors,
-							unit->object.outgoing_function_values,
-							lighting,
-							&render.camera.position,
-							0.0f,
-							&model_effect,
-							first_person_weapon->weapon_index,
-							0,
-							FLAG(_render_model_first_person_bit));
-					}
-				}
-			}
+			first_person_weapon_side= 1;
+			first_person_weapon_draw_side(unit_index, TRUE);
+			first_person_weapon_side= 0;
 		}
 	}
 
@@ -628,6 +759,21 @@ void first_person_weapon_render_update(
 			{
 				first_person_weapon_build_node_matrices(render.local_player_index);
 			}
+			/* port: the left hand's, dual wielding: shown with the right's */
+			first_person_weapon_side= 1;
+			{
+				struct first_person_weapon *left= first_person_weapon_get(render.local_player_index);
+
+				if (left->unit_index!=NONE && left->weapon_index!=NONE)
+				{
+					first_person_weapon_set_visibility(render.local_player_index, visible);
+					if (left->visible)
+					{
+						first_person_weapon_build_node_matrices(render.local_player_index);
+					}
+				}
+			}
+			first_person_weapon_side= 0;
 		}
 	}
 
@@ -750,6 +896,23 @@ void first_person_weapon_message_from_weapon(
 {
 	short local_player_index= first_person_weapon_index_from_weapon_index(weapon_index);
 
+	/* port: a left hand's weapon's, dual wielding */
+	if (local_player_index==NONE && weapon_index!=NONE)
+	{
+		short left_index;
+
+		for (left_index= 0; left_index<MAXIMUM_NUMBER_OF_LOCAL_PLAYERS; left_index++)
+		{
+			if (first_person_weapons_left[left_index].weapon_index==weapon_index &&
+				first_person_weapons_left[left_index].unit_index!=NONE)
+			{
+				first_person_weapon_side= 1;
+				first_person_weapon_message(left_index, message_type);
+				first_person_weapon_side= 0;
+				return;
+			}
+		}
+	}
 	first_person_weapon_message(local_player_index, message_type);
 	if (local_player_index==NONE)
 	{
@@ -816,6 +979,31 @@ void first_person_weapons_update(
 				first_person_weapon_switch_weapons(local_player_index);
 			}
 			first_person_weapon_update(local_player_index);
+			/* port: the left hand's weapon, dual wielding: readied as it is
+			taken, forgotten as it goes */
+			first_person_weapon_side= 1;
+			{
+				struct first_person_weapon *left= first_person_weapon_get(local_player_index);
+				long left_weapon_index= dual_wield_left_weapon(unit_index);
+
+				if (left->unit_index!=unit_index)
+				{
+					first_person_weapon_new_unit(local_player_index, unit_index);
+				}
+				if (left->weapon_index!=left_weapon_index)
+				{
+					if (left_weapon_index!=NONE)
+					{
+						first_person_weapon_message(local_player_index, _first_person_weapon_message_ready);
+					}
+					else
+					{
+						first_person_weapon_forget_weapon(local_player_index);
+					}
+				}
+				first_person_weapon_update(local_player_index);
+			}
+			first_person_weapon_side= 0;
 		}
 	}
 
@@ -832,7 +1020,12 @@ static void first_person_weapon_set_visibility(
 
 	if (visible!=first_person_weapon->visible)
 	{
-		if (visible)
+		/* port: the left hand's (dual wielding) has no effects of its own
+		in first person */
+		if (first_person_weapon_side)
+		{
+		}
+		else if (visible)
 		{
 			match_assert(
 				"c:\\halo\\SOURCE\\interface\\first_person_weapons.c",
@@ -1077,13 +1270,14 @@ static void first_person_weapon_build_node_matrices(
 	(first_person_weapon_update) takes the facing change since the last
 	frame as a tick's worth: move the last facing on once a tick. */
 	{
-		static long last_render_ticks[MAXIMUM_LOCAL_PLAYERS] = { NONE, NONE, NONE, NONE };
+		static long last_render_ticks[2*MAXIMUM_LOCAL_PLAYERS] = { NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE };
+		short state_index= FIRST_PERSON_STATE_INDEX(local_player_index);
 
-		if (!halo_interpolation_enabled() || last_render_ticks[local_player_index] != game_time_get())
+		if (!halo_interpolation_enabled() || last_render_ticks[state_index] != game_time_get())
 		{
 			first_person_weapon->last_render_facing= first_person_weapon->render_facing;
 			first_person_weapon->last_render_position= first_person_weapon->render_position;
-			last_render_ticks[local_player_index]= game_time_get();
+			last_render_ticks[state_index]= game_time_get();
 		}
 	}
 	euler_angles2d_from_vector3d(&first_person_weapon->render_facing, &render.camera.forward);
@@ -1142,7 +1336,7 @@ static void first_person_weapon_build_node_matrices(
 					(port/linux/game/pal_tags.c) */
 					{
 						real fraction= pal_tags_first_person_fraction(
-							local_player_index,
+							FIRST_PERSON_STATE_INDEX(local_player_index),
 							weapon_definition->weapon.interface_definition.first_person_animations.index,
 							first_person_weapon->state_animation.index,
 							first_person_weapon->state_animation.frame_index);
@@ -1380,7 +1574,7 @@ static void first_person_weapon_build_node_matrices(
 		/* the pose between the last two ticks (render_interpolation.c) */
 		/* port: no more nodes than the weapon's matrices hold (a map's count) */
 		render_interpolation_first_person(
-			local_player_index,
+			FIRST_PERSON_STATE_INDEX(local_player_index),
 			first_person_weapon->node_matrices,
 			(short)MIN(animation_graph->nodes.count, MAXIMUM_NODES_PER_ANIMATION),
 			&render.camera);
@@ -1521,9 +1715,12 @@ static void first_person_weapon_switch_weapons(
 	if (first_person_weapon->unit_index!=NONE)
 	{
 		struct unit_datum *unit= unit_get(first_person_weapon->unit_index);
-		long weapon_index= unit_inventory_get_weapon(
-			first_person_weapon->unit_index,
-			unit->unit.current_weapon_index);
+		/* port: the left hand's, dual wielding */
+		long weapon_index= first_person_weapon_side ?
+			dual_wield_left_weapon(first_person_weapon->unit_index) :
+			unit_inventory_get_weapon(
+				first_person_weapon->unit_index,
+				unit->unit.current_weapon_index);
 
 		if (weapon_index!=NONE)
 		{
@@ -1773,7 +1970,7 @@ static void first_person_weapon_update(
 
 		/* port: a PAL map's first-person animation at the NTSC maps' pace,
 		which the weapon's timing keeps (port/linux/game/pal_tags.c) */
-		if (!pal_tags_first_person_advance(local_player_index,
+		if (!pal_tags_first_person_advance(FIRST_PERSON_STATE_INDEX(local_player_index),
 			weapon_definition->weapon.interface_definition.first_person_animations.index,
 			first_person_weapon->state_animation.index, first_person_weapon->state_animation.frame_index))
 		{
@@ -2286,7 +2483,9 @@ static struct first_person_weapon *first_person_weapon_get(
 		1433,
 		local_player_index>=0 && local_player_index<MAXIMUM_NUMBER_OF_LOCAL_PLAYERS);
 
-	return &first_person_weapons[local_player_index];
+	return first_person_weapon_side ?
+		&first_person_weapons_left[local_player_index] :
+		&first_person_weapons[local_player_index];
 }
 
 static short first_person_weapon_index_from_weapon_index(
