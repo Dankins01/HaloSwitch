@@ -381,7 +381,8 @@ static const struct config_setting config_settings[] =
 		"\"bot:<seed>\" plays controller 1 with a scripted pattern (automated\n"
 		"network tests); \"look:<seed>\" stands still, only turning and looking\n"
 		"up and down; \"press:<seconds>=<button>,...\" pushes buttons (a, b, x, y,\n"
-		"start, back, up, down, left, right) at those times; empty for none." },
+		"start, back, up, down, left, right; rt, lt, the triggers; rs, the right\n"
+		"stick) at those times; empty for none." },
 	{ "debug.update_answer", _config_string, "\"\"", "HALO_UPDATE_ANSWER", _environment_value, _platform_desktop,
 		"The answer to the new version question, for automated tests: \"yes\",\n"
 		"\"no\" or \"never\" (do not ask again, confirmed); empty asks." },

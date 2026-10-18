@@ -553,6 +553,13 @@ static void test_input_press(XINPUT_GAMEPAD *pad)
 			if (!strcmp(test_input_presses[index].button, digital_names[name]))
 				pad->wButtons |= digital[name];
 		}
+		/* (the triggers: fire, grenade; the right stick: zoom) */
+		if (!strcmp(test_input_presses[index].button, "rt"))
+			pad->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] = 255;
+		if (!strcmp(test_input_presses[index].button, "lt"))
+			pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = 255;
+		if (!strcmp(test_input_presses[index].button, "rs"))
+			pad->wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
 	}
 }
 

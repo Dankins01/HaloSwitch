@@ -373,8 +373,8 @@ static boolean cache_file_tag_header_verify(
 
 		/* port: each tag's data lies in the tag cache, or there is none yet
 		(a structure bsp's, set as it loads). Every tag_get goes by these.
-		The port's own tags (menu_tags.c) are added after this, and may lie
-		elsewhere */
+		The port's own tags (weapon_tags.c, menu_tags.c) are added after
+		this, and may lie elsewhere */
 		for (absolute_index = 0;
 			!problem && absolute_index < tag_header->tag_count;
 			absolute_index++)
@@ -530,6 +530,13 @@ void scenario_tags_unload(
 		extern void menu_tags_unloaded(void);
 
 		menu_tags_unloaded();
+	}
+	/* port: then the Halo 2 weapons' (port/linux/game/weapon_tags.c), whose
+	table the menus' copied */
+	{
+		extern void weapon_tags_unloaded(void);
+
+		weapon_tags_unloaded();
 	}
 	cache_file_close();
 	tags_header_deregister_vertex_and_index_buffers(cache_file_globals.tag_header);
@@ -1063,6 +1070,13 @@ long scenario_tags_load(
 				extern void pal_tags_loaded(char const *build);
 
 				pal_tags_loaded(cache_file_globals.header.build);
+			}
+			/* port: the Halo 2 weapons' tags, added to a survival arena's map's
+			(port/linux/game/weapon_tags.c), before the menus' */
+			{
+				extern void weapon_tags_loaded(char const *map_name);
+
+				weapon_tags_loaded(cache_file_globals.header.name);
 			}
 			/* port: the menus' tags, added to the map's (port/linux/game/menu_tags.c) */
 			{
