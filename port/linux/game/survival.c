@@ -57,6 +57,7 @@ double config_real(char const *name);
 long config_integer(char const *name);
 void unit_scripting_set_current_vitality_of(long unit_index, real body_vitality, real shield_vitality);
 char *tag_get_name(long tag_index);
+short objects_port_collect_old_garbage(short keep, short maximum);
 
 /* ---------- constants */
 
@@ -94,6 +95,12 @@ enum
 	SURVIVAL_WAVE_BONUS = 25,
 	/* the most grenades of a kind the shop's fill to */
 	SURVIVAL_SHOP_MAXIMUM_GRENADES = 4,
+
+	/* the cleanup: how often, the newest bodies and dropped items kept, and
+	the most of the older (unseen) let go each time */
+	SURVIVAL_CLEANUP_PERIOD = 2 * TICKS_PER_SECOND,
+	SURVIVAL_GARBAGE_KEPT = 12,
+	SURVIVAL_GARBAGE_COLLECTED = 3,
 };
 
 /* the nearest a squad's starting location can be to the arena's center
@@ -167,6 +174,7 @@ enum
 	_survival_good_plasma_grenades,
 	_survival_good_ammunition,
 	_survival_good_fireteam,
+	_survival_good_vehicle, /* put down in front, where there is room */
 };
 
 struct survival_good
@@ -198,6 +206,7 @@ static struct survival_good const survival_goods[] =
 	{ "SNIPER RIFLE", 450, _survival_good_weapon, 'weap', "weapons\\sniper rifle\\sniper rifle" },
 	{ "FUEL ROD GUN", 500, _survival_good_weapon, 'weap', "weapons\\fuel rod gun\\fuel rod" },
 	{ "ROCKET LAUNCHER", 600, _survival_good_weapon, 'weap', "weapons\\rocket launcher\\rocket launcher" },
+	{ "WARTHOG", 1000, _survival_good_vehicle, 'vehi', "vehicles\\warthog\\warthog" },
 };
 
 /* (the places: a ground squad's starting location where the level's
@@ -240,6 +249,8 @@ static struct
 	long state_time;
 	long last_count_time;
 	long last_reveal_time;
+	long last_cleanup_time;
+	long cleaned;
 	short wave;
 	short wave_placed;
 	/* the living when the wave came (its own and any left from the last
@@ -974,6 +985,8 @@ static void survival_begin(
 	survival.tracked_count = 0;
 	survival.fireteams = 0;
 	survival.shop_status[0] = 0;
+	survival.last_cleanup_time = 0;
+	survival.cleaned = 0;
 	survival_set_state(_survival_state_intermission);
 	if (survival.squad_count == 0)
 	{
@@ -1099,6 +1112,14 @@ void survival_update(
 		}
 		return;
 	}
+	/* (the bodies and the dropped weapons of the waves before let go,
+	those out of sight, the oldest first, a few at a time) */
+	if ((survival.state == _survival_state_intermission || survival.state == _survival_state_wave) &&
+		now - survival.last_cleanup_time >= SURVIVAL_CLEANUP_PERIOD)
+	{
+		survival.last_cleanup_time = now;
+		survival.cleaned += objects_port_collect_old_garbage(SURVIVAL_GARBAGE_KEPT, SURVIVAL_GARBAGE_COLLECTED);
+	}
 	switch (survival.state)
 	{
 	case _survival_state_waiting_for_player:
@@ -1166,6 +1187,8 @@ void survival_update(
 			{
 				survival.kills += survival.wave_start_living - living;
 				survival.points += SURVIVAL_WAVE_BONUS * survival.wave;
+				platform_log("survival: wave %d cleared; %ld bodies and items cleaned up so far", survival.wave,
+					survival.cleaned);
 				survival_message("WAVE %d CLEARED: +%d, %ld POINTS. Next wave in %d seconds", survival.wave,
 					SURVIVAL_WAVE_BONUS * survival.wave, survival.points, SURVIVAL_INTERMISSION / TICKS_PER_SECOND);
 				survival_resupply();
@@ -1232,6 +1255,99 @@ static void survival_shop_say(
 	va_end(arguments);
 	survival.shop_status[sizeof(survival.shop_status) - 1] = 0;
 	platform_log("survival: shop: %s", survival.shop_status);
+}
+
+/* whether the line from a to b crosses the level's structure */
+static boolean survival_blocked(
+	real_point3d const *a,
+	real_point3d const *b)
+{
+	struct collision_result collision;
+	real_vector3d vector;
+
+	vector.i = b->x - a->x;
+	vector.j = b->y - a->y;
+	vector.k = b->z - a->z;
+	return collision_test_vector(FLAG(_collision_test_front_facing_surfaces_bit) |
+		FLAG(_collision_test_back_facing_surfaces_bit) | FLAG(_collision_test_structure_bit) |
+		FLAG(_collision_test_objects_bit) | FLAG(_collision_test_objects_scenery_bit) |
+		FLAG(_collision_test_objects_vehicles_bit), a, &vector, NONE, &collision);
+}
+
+/* a place for a vehicle of about `length` by `width` world units in front of
+the unit (else to a side, else behind), on the ground, with room around
+and above it and nothing between it and the unit; its facing the unit's
+or the side's direction; FALSE if none */
+static boolean survival_vehicle_place(
+	struct unit_datum *unit,
+	real length,
+	real width,
+	real_point3d *place,
+	real_vector3d *forward)
+{
+	short side;
+
+	for (side = 0; side < 4; side++)
+	{
+		real_vector3d direction = unit->object.forward;
+		real_vector3d across;
+		real_point3d center, eye = unit->object.position, above;
+		struct collision_result collision;
+		real_vector3d down = { 0.0f, 0.0f, -4.0f };
+		boolean room = TRUE;
+		short corner;
+		real turned_i;
+
+		direction.k = 0.0f;
+		if (normalize3d(&direction) == 0.0f)
+		{
+			direction.i = 1.0f;
+			direction.j = 0.0f;
+		}
+		/* (a quarter turn each time) */
+		for (corner = 0; corner < side; corner++)
+		{
+			turned_i = -direction.j;
+			direction.j = direction.i;
+			direction.i = turned_i;
+		}
+		across.i = -direction.j;
+		across.j = direction.i;
+		across.k = 0.0f;
+		eye.z += 0.5f;
+		center = eye;
+		center.x += direction.i * (length * 0.5f + 1.2f);
+		center.y += direction.j * (length * 0.5f + 1.2f);
+		if (survival_blocked(&eye, &center))
+			continue;
+		/* (the ground under it, and room above) */
+		if (!collision_test_vector(FLAG(_collision_test_front_facing_surfaces_bit) | FLAG(_collision_test_structure_bit),
+			&center, &down, NONE, &collision))
+		{
+			continue;
+		}
+		center.z = collision.point.z + 0.6f;
+		above = center;
+		above.z += 1.5f;
+		if (survival_blocked(&center, &above))
+			continue;
+		/* (its corners clear of walls) */
+		for (corner = 0; corner < 4 && room; corner++)
+		{
+			real_point3d point = center;
+			real along = (corner & 1 ? 0.5f : -0.5f) * length, beside = (corner & 2 ? 0.5f : -0.5f) * width;
+
+			point.x += direction.i * along + across.i * beside;
+			point.y += direction.j * along + across.j * beside;
+			room = !survival_blocked(&center, &point);
+		}
+		if (!room)
+			continue;
+		*place = center;
+		*forward = direction;
+		return TRUE;
+	}
+	return FALSE;
 }
 
 /* a fireteam of the level's Marines, from the next of their squads near,
@@ -1387,6 +1503,31 @@ boolean survival_shop_buy(
 		bought = survival_shop_fireteam();
 		survival_shop_say(bought ? "MARINE FIRETEAM: ON THE WAY" : "MARINE FIRETEAM: NONE CAN COME");
 		break;
+	case _survival_good_vehicle:
+	{
+		long tag_index = tag_loaded(good->group_tag, good->tag_name);
+		struct object_placement_data data;
+		real_point3d place;
+		real_vector3d forward;
+
+		if (tag_index == NONE)
+			break;
+		if (!survival_vehicle_place(unit, 2.4f, 1.4f, &place, &forward))
+		{
+			survival_shop_say("%s: NO ROOM FOR ONE HERE", good->name);
+			return FALSE;
+		}
+		object_placement_data_new(&data, tag_index, NONE);
+		data.position = place;
+		data.forward = forward;
+		data.up.i = 0.0f;
+		data.up.j = 0.0f;
+		data.up.k = 1.0f;
+		bought = object_new(&data) != NONE;
+		if (bought)
+			survival_shop_say("%s: READY", good->name);
+		break;
+	}
 	}
 	if (!bought)
 		return FALSE;

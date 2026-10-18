@@ -3870,6 +3870,9 @@ points, below them what the last purchase did. A on a row buys its good. */
 static struct
 {
 	short first;
+	/* the row focused the last frame (a press past an end wraps to the
+	other end) */
+	short last_row;
 } shop;
 
 static void wide_from_ascii(char const *ascii, wchar_t *text, long length)
@@ -3885,6 +3888,7 @@ static void wide_from_ascii(char const *ascii, wchar_t *text, long length)
 static boolean survival_shop_initialize(struct widget_instance *list)
 {
 	shop.first = 0;
+	shop.last_row = 0;
 	focus_row(list, 0);
 	return TRUE;
 }
@@ -3899,7 +3903,17 @@ static void survival_shop_update(struct widget_instance *list)
 	char ascii[ROW_TEXT_LENGTH];
 	wchar_t text[ROW_TEXT_LENGTH];
 
-	if (row != NONE && shown > 1 && row >= shown - 1 && shop.first + shown < count)
+	if (row != NONE && shown > 1 && row == 0 && shop.last_row == shown - 1)
+	{
+		/* (past the last good: the first) */
+		shop.first = 0;
+	}
+	else if (row != NONE && shown > 1 && row == shown - 1 && shop.last_row == 0)
+	{
+		/* (before the first: the last) */
+		shop.first = (short)MAX(count - shown, 0);
+	}
+	else if (row != NONE && shown > 1 && row >= shown - 1 && shop.first + shown < count)
 	{
 		shop.first++;
 		focus_row(list, --row);
@@ -3909,6 +3923,7 @@ static void survival_shop_update(struct widget_instance *list)
 		shop.first--;
 		focus_row(list, ++row);
 	}
+	shop.last_row = row;
 	shop.first = (short)PIN(shop.first, 0, MAX(count - shown, 0));
 	for (child = list->child; child; child = child->next, index++)
 	{

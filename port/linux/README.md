@@ -199,8 +199,12 @@ each wave cleared 25 times its number. In the pause menu, SURVIVAL SHOP (in
 the place of RESTART AT SAVE POINT) spends them, while the game is paused:
 a fireteam of the level's Marines that follows the players, an overshield,
 active camouflage, two more grenades of a kind, a full load of ammunition,
-and the level's own weapons (from the pistol for 100 to the rocket
-launcher for 600), dropped at the player's feet to be picked up. There is
+the level's own weapons (from the pistol for 100 to the rocket launcher
+for 600), dropped at the player's feet to be picked up, and on a level
+with Warthogs one for 1000, put down in front where there is room for it.
+The bodies and dropped weapons of the waves before are cleaned up as the
+game goes on, a few at a time and only those out of sight, the newest
+dozen kept. There is
 one life: dying ends the game, with the waves survived, the kills and the
 points on the HUD, and goes back to the main menu. In split screen co-op,
 a player who dies comes back while the other lives. A survival game is

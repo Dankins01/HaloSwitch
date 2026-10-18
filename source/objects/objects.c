@@ -5107,3 +5107,45 @@ static void object_compute_change_colors(
 
 	return;
 }
+
+/* port: survival's cleanup (port/linux/game/survival.c): of the garbage
+(dead bodies, dropped weapons and equipment), the oldest beyond the newest
+`keep` that no player can see, `maximum` at most, are deleted, a few at a
+time so that their going is not seen; the number deleted */
+short objects_port_collect_old_garbage(
+	short keep,
+	short maximum)
+{
+	static long garbage_object_indices[MAXIMUM_OBJECTS_PER_MAP];
+	long garbage_object_index;
+	struct object_datum *object;
+	short count = 0, deleted = 0, index;
+
+	for (garbage_object_index = object_globals->first_garbage_object_index;
+		garbage_object_index != NONE && count < MAXIMUM_OBJECTS_PER_MAP;
+		garbage_object_index = object->object.next_garbage_object_index)
+	{
+		object = object_get(garbage_object_index);
+		garbage_object_indices[count++] = garbage_object_index;
+	}
+	/* (the list's newest first: the oldest from its end) */
+	for (index = count - 1; index >= keep && deleted < maximum; index--)
+	{
+		long object_index = garbage_object_indices[index];
+		struct object_header_datum *header = object_header_get(object_index);
+
+		object = object_get(object_index);
+		if (object_visible_to_any_player(object_index) ||
+			(TEST_FLAG(_object_mask_unit, object->object.type) && !TEST_FLAG(object->object.damage_flags, _object_dead_bit)))
+		{
+			continue;
+		}
+		if (TEST_FLAG(header->flags, _object_header_active_bit))
+			--object_globals->active_garbage_object_count;
+		object_set_garbage(object_index, FALSE);
+		object_delete_immediately(object_index);
+		deleted++;
+	}
+	return deleted;
+}
+
