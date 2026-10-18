@@ -37,6 +37,7 @@ no screen pauses the game (a network game's clock runs on).
 #include "rasterizer/xbox/rasterizer_xbox_hardware_bitmaps.h"
 
 #include "halo_menus.h"
+#include "survival.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -72,7 +73,8 @@ boolean pc_menu_frame_placement(struct bitmap_data const *bitmap, short *x, shor
 /* the multiplayer maps' widget collection, whose pause screens pause_patch
 adds to */
 #define MULTIPLAYER_COLLECTION "ui\\shell\\multiplayer"
-/* the tags pause_patch adds: two buttons and their texts */
+/* the tags pause_patch adds: two buttons and their texts (survival_pause_patch:
+one text) */
 #define PAUSE_PATCH_TAGS 4
 /* what a frame of ui.map's is drawn as in a game map, which has not got it */
 #define BLANK_PNG "ce/port/blank__0.png"
@@ -372,6 +374,8 @@ static char const *const port_function_names[] =
 	"player profile save changes",
 	/* (the server browser's password screen) */
 	"port password init", "port password edit", "port password join", "port password back",
+	/* (a survival game's shop: survival_pause_patch) */
+	"port survival shop open", "port survival shop initialize", "port survival shop buy",
 };
 
 /* the PC version's game data functions that the Xbox's have not, from
@@ -393,6 +397,7 @@ static char const *const port_game_data_input_names[] =
 	/* (the profile settings' picture: the Xbox's of the button settings,
 	on Gamepad Setup's row) */
 	"port gamepad layout preview",
+	"port survival shop update",
 };
 
 static struct
@@ -430,6 +435,9 @@ static struct
 	/* a multiplayer map's build (the pause menu's SETTINGS): what the map
 	has not got is none, not a failure */
 	boolean game_map;
+	/* a survival game's map (a campaign map, played on one machine): its
+	screens pause the game */
+	boolean survival_map;
 } build;
 
 /* ---------- private code */
@@ -1037,7 +1045,7 @@ static void *widget_build(long widget_index)
 	definition->flags = flags_parse(source->flags, widget_flag_names, NUMBEROF(widget_flag_names),
 		source->file, source->line);
 	/* (in a network game the clock runs on) */
-	if (build.game_map)
+	if (build.game_map && !build.survival_map)
 		definition->flags &= ~FLAG(1); /* pause_game */
 	definition->milliseconds_to_auto_close = source->auto_close;
 	definition->auto_close_fade_time = source->auto_close_fade;
@@ -1646,6 +1654,71 @@ static void pause_patch(struct cache_file_tag_instance *instances)
 		platform_log("menus: the pause menu has SETTINGS%s", host ? " and END GAME" : "");
 }
 
+/* ---------- the in-game pause menu of a survival game (a campaign map's)
+
+Its RESTART AT SAVE POINT (a survival game has no save point: it starts
+again, as RESTART LEVEL does) becomes SURVIVAL SHOP, which opens the shop
+(survival/shop/shop_screen: port/linux/game/survival.c's goods), on the
+split screen pause menu too. The button keeps its look and place. */
+
+#define SURVIVAL_SHOP_SCREEN "survival/shop/shop_screen"
+
+static void survival_pause_patch(struct cache_file_tag_instance *instances)
+{
+	static char const *const buttons[] =
+	{
+		"ui\\shell\\solo_game\\pause_game\\restart_at_save_point_button",
+		"ui\\shell\\solo_game\\pause_game\\coop_restart_at_save_point_button",
+	};
+	char const *text = "SURVIVAL SHOP";
+	long shop_widget = widget_named(SURVIVAL_SHOP_SCREEN);
+	long open_function = function_index("port survival shop open", "pause", 0);
+	long text_tag = NONE, patched = 0, button;
+
+	if (shop_widget == NONE)
+		return;
+	for (button = 0; button < NUMBEROF(buttons); button++)
+	{
+		long tag_index = tag_loaded(UI_WIDGET_DEFINITION_TAG, buttons[button]);
+		struct ui_widget_definition *definition;
+		struct ui_widget_event_handler_reference *handlers;
+		long handler;
+
+		if (tag_index == NONE)
+			continue;
+		definition = tag_get(UI_WIDGET_DEFINITION_TAG, tag_index);
+		handlers = allocate(MAX(definition->event_handlers.count, 1) * sizeof(*handlers));
+		if (!handlers)
+			return;
+		if (text_tag == NONE)
+		{
+			text_tag = next_tag();
+			instance_set(instances, UNICODE_STRING_LIST_TAG, text_tag, "survival/shop_button", " text",
+				string_list_build(&text, 1));
+		}
+		reference_set(&definition->text_label_string_list, UNICODE_STRING_LIST_TAG, text_tag);
+		definition->string_list_index = 0;
+		/* (each of its events, its A and Start, opens the shop) */
+		if (definition->event_handlers.count)
+		{
+			memcpy(handlers, definition->event_handlers.address,
+				definition->event_handlers.count * sizeof(*handlers));
+		}
+		for (handler = 0; handler < definition->event_handlers.count; handler++)
+		{
+			handlers[handler].flags = FLAG(_event_handler_run_function_bit) | FLAG(_event_handler_open_widget_bit) |
+				FLAG(_event_handler_try_to_branch_on_failure_bit);
+			handlers[handler].function = (short)open_function;
+			handlers[handler].script[0] = 0;
+			reference_set(&handlers[handler].widget_tag, UI_WIDGET_DEFINITION_TAG, build.widget_tags[shop_widget]);
+		}
+		definition->event_handlers.address = handlers;
+		patched++;
+	}
+	if (patched)
+		platform_log("menus: the pause menu has SURVIVAL SHOP");
+}
+
 void menu_tags_loaded(
 	char const *map_name)
 {
@@ -1655,8 +1728,9 @@ void menu_tags_loaded(
 
 	boolean game_map = strcmp(map_name, "ui") != 0;
 
-	/* (ui.map, and a multiplayer map: its pause menu's SETTINGS) */
-	if ((game_map && tag_loaded('Soul', MULTIPLAYER_COLLECTION) == NONE) ||
+	/* (ui.map, a multiplayer map: its pause menu's SETTINGS, and a survival
+	game's map: its pause menu's SURVIVAL SHOP) */
+	if ((game_map && tag_loaded('Soul', MULTIPLAYER_COLLECTION) == NONE && !survival_map_is_arena(map_name)) ||
 		strcmp(config_string("display.menus"), "pc"))
 	{
 		return;
@@ -1667,6 +1741,7 @@ void menu_tags_loaded(
 	memset(&build, 0, sizeof(build));
 	build.menus = menus;
 	build.game_map = game_map;
+	build.survival_map = game_map && survival_map_is_arena(map_name);
 	widget_count = menus->widget_count;
 	build.widget_tags = malloc((widget_count + 1) * sizeof(long));
 	build.text_tags = malloc((widget_count + 1) * sizeof(long));
@@ -1747,6 +1822,8 @@ void menu_tags_loaded(
 	if (game_map)
 	{
 		pause_patch(instances);
+		if (!build.failed && survival_map_is_arena(map_name))
+			survival_pause_patch(instances);
 		if (build.failed)
 			goto failed;
 		/* (those it made) */

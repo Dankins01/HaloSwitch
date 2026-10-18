@@ -1159,6 +1159,61 @@ def _map_kind() -> list:
     return lines
 
 
+# the SURVIVAL SHOP's rows (more goods scroll)
+SURVIVAL_SHOP_ROWS = 10
+
+
+def _survival_shop() -> list:
+    """the SURVIVAL SHOP, which a survival game's pause menu opens (its
+    RESTART AT SAVE POINT, which a survival game has not, turned into it:
+    menu_tags.c's survival_pause_patch): the goods the level has with their
+    prices, the points to buy them with, and what the last purchase did
+    (menu_functions.c's shop functions; port/linux/game/survival.c). It
+    pauses the game, and B goes back to the pause menu."""
+    base = "survival/shop"
+    lines = _widget(f"{base}/shop_screen", [("width", 640), ("height", 480),
+                                            ("flags", "pass_unhandled_to_focused_child pause_game"),
+                                            ("bitmap", "bitmaps/gradient")],
+                    ['<on event="b" back="true"/>', '<on event="back" back="true"/>',
+                     f'<child widget="{base}/title"/>', f'<child widget="{base}/points_text"/>',
+                     f'<child widget="{base}/shop_list"/>', f'<child widget="{base}/status_text"/>',
+                     f'<child widget="{base}/help_text"/>'])
+    lines += _widget(f"{base}/title", [("type", "text"), ("left", 125), ("top", 34), ("width", 260), ("height", 30),
+                                       ("text", "SURVIVAL SHOP"), ("font", "ui\\large_ui"), ("color", "#FF2896FF"),
+                                       ("text_flags", "no_focus_test")], [])
+    lines += _widget(f"{base}/points_text", [("type", "text"), ("left", 335), ("top", 34), ("width", 180),
+                                             ("height", 30), ("font", "ui\\large_ui"), ("color", "#FFFFFFFF"),
+                                             ("align", "right"), ("text_flags", "no_focus_test")], [])
+    rows = [f'<child widget="{base}/list_item_{index}" x="125" y="{72 + 30 * index}"/>'
+            for index in range(SURVIVAL_SHOP_ROWS)]
+    lines += _widget(f"{base}/shop_list", [("type", "column_list"), ("width", 640), ("height", 480),
+                                           ("flags", "pass_unhandled_to_focused_child up_down_tabs_children")],
+                     ['<data input="port survival shop update"/>',
+                      '<on event="created" run="port survival shop initialize"/>', *rows])
+    for index in range(SURVIVAL_SHOP_ROWS):
+        lines += _widget(f"{base}/list_item_{index}",
+                         [("width", 390), ("height", 28),
+                          ("bitmap", "bitmaps/sel_list_item_bkd_top" if index == 0 else "bitmaps/sel_list_item_bkd"),
+                          ("font", "ui\\large_ui"), ("color", "#FF2896FF"), ("text_y", 3)],
+                         ['<on event="a" run="port survival shop buy"/>',
+                          '<on event="start" run="port survival shop buy"/>',
+                          '<on event="left_mouse" run="mouse emit accept event"/>',
+                          '<child widget="main_menu/new_select/list_item_text" x="25"/>',
+                          f'<child widget="{base}/price_text" x="275"/>',
+                          '<child widget="main_menu/new_select/list_item_arrows"/>'])
+    lines += _widget(f"{base}/price_text", [("type", "text"), ("width", 90), ("height", 28), ("font", "ui\\large_ui"),
+                                            ("color", "#FF2896FF"), ("align", "right"), ("text_y", 3),
+                                            ("text_flags", "no_focus_test")], [])
+    lines += _widget(f"{base}/status_text", [("type", "text"), ("left", 125), ("top", 378), ("width", 390),
+                                             ("height", 24), ("font", "ui\\small_ui"), ("color", "#FFFFFFFF"),
+                                             ("align", "center"), ("text_flags", "no_focus_test")], [])
+    lines += _widget(f"{base}/help_text", [("type", "text"), ("left", 125), ("top", 406), ("width", 390),
+                                           ("height", 24), ("text", "A: BUY          B: BACK"), ("font", "ui\\small_ui"),
+                                           ("color", "#FF2896FF"), ("align", "center"), ("text_flags", "no_focus_test")],
+                     [])
+    return lines
+
+
 def multiplayer_files() -> dict:
     """the port's multiplayer widgets: the browser's additions, the server
     settings, the lobby"""
@@ -1170,6 +1225,7 @@ def multiplayer_files() -> dict:
         f"{MT}/lobby".replace("/", ".") + ".xml": head + _lobby() + ["</menus>", ""],
         f"{MT}/coop".replace("/", ".") + ".xml": head + _coop() + ["</menus>", ""],
         "main_menu/new_select".replace("/", ".") + ".port.xml": head + _map_kind() + ["</menus>", ""],
+        "survival.shop.xml": head + _survival_shop() + ["</menus>", ""],
         "main_menu/settings_select/multiplayer_setup/item_options_edit".replace("/", ".") + ".port.xml": head + _item_options_extras() + ["</menus>", ""],
     }
 

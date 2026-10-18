@@ -537,6 +537,10 @@ static void encounter_control_actors(
 
 static void encounter_clear_pursuit(
 	long encounter_index);
+/* port: survival's forced actors (encounter_survival_place's): the actor
+palette entry placed instead of the squad's, NONE for the squad's own
+(port/linux/game/survival.c) */
+static short survival_actor_palette_override = NONE;
 static boolean encounter_place_actor(
 	long encounter_index,
 	short squad_index,
@@ -3181,6 +3185,8 @@ static boolean encounter_place_actor(
 
 		if (starting_location->actor_variant_index != NONE)
 			actor_palette_index = starting_location->actor_variant_index;
+		if (survival_actor_palette_override != NONE)
+			actor_palette_index = survival_actor_palette_override;
 
 		if (VALID_INDEX(actor_palette_index, scenario->ai_actor_palette.count))
 		{
@@ -4183,24 +4189,66 @@ short encounter_survival_living_count(
 
 /* places `count` of the squad's actors, spread on free ground around its
 starting locations (the extra enemies' places: coop_enemies.c), `first`
-counting on from the squad's last ones; the number placed */
+counting on from the squad's last ones, each of the actor palette's entry
+`actor_palette_index` (NONE: the squad's own); the number placed */
 short encounter_survival_place(
 	long encounter_index,
 	short squad_index,
 	short count,
-	short first)
+	short first,
+	short actor_palette_index)
 {
 	short placed = 0;
 	short i;
 
 	if (!ai_globals->ai_initialized_for_map || !encounter_try_and_get(encounter_index))
 		return 0;
+	survival_actor_palette_override = actor_palette_index;
 	for (i = 0; i < count; ++i)
 	{
 		if (encounter_place_actor(encounter_index, squad_index, 0, FALSE, (short)(first + i + 1)))
 			placed++;
 	}
+	survival_actor_palette_override = NONE;
 	encounter_update_status(encounter_index);
 	encounters_test_activation();
 	return placed;
+}
+
+/* the encounter's actors: each one's datum, kind (_actor_elite and so on)
+and living units (a swarm's, else 0 or 1), at most `maximum`; their number */
+short encounter_survival_actors(
+	long encounter_index,
+	long *actor_indices,
+	short *actor_types,
+	short *living,
+	short maximum)
+{
+	struct encounter_actor_iterator iterator;
+	struct actor_datum *actor;
+	short count = 0;
+
+	if (!ai_globals->ai_initialized_for_map || !encounter_try_and_get(encounter_index))
+		return 0;
+	encounter_actor_iterator_new(&iterator, encounter_index);
+	while (count < maximum && (actor = encounter_actor_iterator_next(&iterator)) != NULL)
+	{
+		short units = 0;
+
+		if (actor->meta.unit_index != NONE)
+		{
+			struct unit_datum *unit = unit_try_and_get(actor->meta.unit_index);
+
+			units = unit && !TEST_FLAG(unit->object.damage_flags, _object_dead_bit);
+		}
+		else
+		{
+			units = actor->meta.swarm_unit_count;
+		}
+		actor_indices[count] = iterator.index;
+		actor_types[count] = actor->meta.type;
+		living[count] = units;
+		count++;
+	}
+	return count;
 }

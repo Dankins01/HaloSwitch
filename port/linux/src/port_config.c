@@ -380,7 +380,8 @@ static const struct config_setting config_settings[] =
 	{ "debug.test_input", _config_string, "\"\"", "HALO_TEST_INPUT", _environment_value, _platform_all,
 		"\"bot:<seed>\" plays controller 1 with a scripted pattern (automated\n"
 		"network tests); \"look:<seed>\" stands still, only turning and looking\n"
-		"up and down; empty for none." },
+		"up and down; \"press:<seconds>=<button>,...\" pushes buttons (a, b, x, y,\n"
+		"start, back, up, down, left, right) at those times; empty for none." },
 	{ "debug.update_answer", _config_string, "\"\"", "HALO_UPDATE_ANSWER", _environment_value, _platform_desktop,
 		"The answer to the new version question, for automated tests: \"yes\",\n"
 		"\"no\" or \"never\" (do not ask again, confirmed); empty asks." },
@@ -389,6 +390,8 @@ static const struct config_setting config_settings[] =
 		"Cartographer), as the menus' SURVIVAL starts one, for tests; empty for none." },
 	{ "debug.survival_clear_after", _config_real, "0.0", "HALO_SURVIVAL_CLEAR_AFTER", _environment_value, _platform_all,
 		"Kill each survival wave this many seconds after it comes (tests); 0 never." },
+	{ "debug.survival_points", _config_integer, "0", "HALO_SURVIVAL_POINTS", _environment_value, _platform_all,
+		"The points a survival game starts with, for the shop's tests; 0 none." },
 	{ "debug.exit_after", _config_real, "0.0", "HALO_EXIT_AFTER", _environment_value, _platform_all,
 		"Quit this many seconds after the window opens; 0 never." },
 	{ "debug.hidden_window", _config_boolean, "false", "HALO_HIDDEN_WINDOW", _environment_set_is_true, _platform_desktop,

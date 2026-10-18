@@ -958,19 +958,23 @@ static void multiplayer_map_text(short map, wchar_t *text)
 	string_get("pc\\main_menu\\mp_map_list", map, text);
 }
 
-static void survival_arena_text(short arena, wchar_t *text)
-{
-	ustrncpy(text, survival_arena_display_name(arena), ROW_TEXT_LENGTH - 1);
-	text[ROW_TEXT_LENGTH - 1] = 0;
-}
-
-/* the campaign level an arena is on (its picture, name and words for the
-description) */
+/* the campaign level an arena is on (its name for the row, and its
+picture, name and words for the description) */
 static short survival_arena_level(short arena)
 {
 	char const *map_name = survival_arena_map_name(arena);
 
 	return map_name ? main_get_solo_level_from_name(map_name) : NONE;
+}
+
+static void survival_arena_text(short arena, wchar_t *text)
+{
+	short level = survival_arena_level(arena);
+
+	if (level == NONE)
+		text[0] = 0;
+	else
+		string_get("pc\\main_menu\\map_list", level, text);
 }
 
 /* the description's map (each list's has both kinds' widgets): a campaign
@@ -3856,6 +3860,92 @@ static boolean profile_save_changes(struct widget_instance *widget, boolean *wid
 	return TRUE;
 }
 
+/* ---- a survival game's SURVIVAL SHOP (the pause menu's: menu_tags.c's
+survival_pause_patch): its rows the goods the level has (survival.c's),
+named and priced, more of them scrolling at the list's ends; above them the
+points, below them what the last purchase did. A on a row buys its good. */
+
+#define SURVIVAL_SHOP_ROWS 10
+
+static struct
+{
+	short first;
+} shop;
+
+static void wide_from_ascii(char const *ascii, wchar_t *text, long length)
+{
+	long index;
+
+	for (index = 0; ascii[index] && index < length - 1; index++)
+		text[index] = (wchar_t)(unsigned char)ascii[index];
+	text[index] = 0;
+}
+
+/* "port survival shop initialize": on the first good */
+static boolean survival_shop_initialize(struct widget_instance *list)
+{
+	shop.first = 0;
+	focus_row(list, 0);
+	return TRUE;
+}
+
+/* "port survival shop update" */
+static void survival_shop_update(struct widget_instance *list)
+{
+	short count = survival_shop_good_count();
+	short shown = (short)MIN(count, SURVIVAL_SHOP_ROWS);
+	short row = focused_row(list), index = 0;
+	struct widget_instance *child;
+	char ascii[ROW_TEXT_LENGTH];
+	wchar_t text[ROW_TEXT_LENGTH];
+
+	if (row != NONE && shown > 1 && row >= shown - 1 && shop.first + shown < count)
+	{
+		shop.first++;
+		focus_row(list, --row);
+	}
+	else if (row == 0 && shop.first > 0)
+	{
+		shop.first--;
+		focus_row(list, ++row);
+	}
+	shop.first = (short)PIN(shop.first, 0, MAX(count - shown, 0));
+	for (child = list->child; child; child = child->next, index++)
+	{
+		if (strncmp(child->name, "list_item_", 10))
+			break;
+		child->visible = index < shown;
+		if (index < shown)
+		{
+			wide_from_ascii(survival_shop_good_name((short)(shop.first + index)), text, ROW_TEXT_LENGTH);
+			text_set(named(child, "list_item_text", 0), text);
+			snprintf(ascii, sizeof(ascii), "%ld", survival_shop_good_price((short)(shop.first + index)));
+			wide_from_ascii(ascii, text, ROW_TEXT_LENGTH);
+			text_set(named(child, "price_text", 0), text);
+		}
+		visible_set(named(child, "list_item_arrows", 0), child == list->focused_child);
+	}
+	snprintf(ascii, sizeof(ascii), "POINTS: %ld", survival_points());
+	wide_from_ascii(ascii, text, ROW_TEXT_LENGTH);
+	text_set(named(list->parent, "points_text", 0), text);
+	wide_from_ascii(survival_shop_status(), text, ROW_TEXT_LENGTH);
+	text_set(named(list->parent, "status_text", 0), text);
+}
+
+/* "port survival shop buy": the focused row's good (a row: the widget) */
+static boolean survival_shop_choose(struct widget_instance *row_widget)
+{
+	struct widget_instance *list = row_widget->parent;
+	short row = list ? focused_row(list) : NONE;
+	boolean bought;
+
+	if (row == NONE)
+		return FALSE;
+	bought = survival_shop_buy((short)(shop.first + row), controller_of(row_widget));
+	ui_play_audio_feedback_sound(bought ? SOUND_FORWARD : SOUND_ERROR);
+	return bought;
+}
+
 /* "port pause end game" (the in-game pause menu's END GAME, the host's:
 menu_tags.c's pause_patch): the game ends as its time limit would, its
 players staying for the next (the carnage report, then the host's PICK GAME) */
@@ -5282,6 +5372,20 @@ boolean pc_menu_event_function_invoke(
 		{
 			return preview_leave(controller);
 		}
+		else if (!strcmp(name, "port survival shop open"))
+		{
+			survival_shop_opened();
+			return TRUE;
+		}
+		else if (!strcmp(name, "port survival shop initialize"))
+		{
+			return survival_shop_initialize(widget);
+		}
+		else if (!strcmp(name, "port survival shop buy"))
+		{
+			survival_shop_choose(widget);
+			return TRUE;
+		}
 		else if (!strcmp(name, "port coop begin"))
 		{
 			return coop_begin(controller);
@@ -5416,4 +5520,6 @@ void pc_menu_game_data_function_invoke(
 		saved_game_list_update(widget);
 	else if (!strcmp(name, "port gamepad layout preview"))
 		profile_gamepad_layout(widget);
+	else if (!strcmp(name, "port survival shop update"))
+		survival_shop_update(widget);
 }

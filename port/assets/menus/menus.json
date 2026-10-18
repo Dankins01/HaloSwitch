@@ -51,6 +51,7 @@
   "ce/main_menu.xml",
   "ce/shell.xml",
   "ce/strings.xml",
+  "ce/survival.shop.xml",
   "ce/port/blank__0.png",
   "ce/port/main_menu/multiplayer_type_select/coop/header_player_2.png",
   "ce/port/main_menu/multiplayer_type_select/join_game/header_direct_link.png",

@@ -9,11 +9,11 @@ Survival: waves of enemies on a campaign level (survival.c).
 
 /* ---------- constants */
 
-/* the arenas the menus offer (survival.c's table) */
+/* the arenas the menus offer (survival.c's table): one on each campaign
+level, in the levels' order */
 enum
 {
-	SURVIVAL_ARENA_SILENT_CARTOGRAPHER = 0,
-	NUMBER_OF_SURVIVAL_ARENAS
+	NUMBER_OF_SURVIVAL_ARENAS = 10
 };
 
 /* ---------- prototypes/SURVIVAL.C */
@@ -24,9 +24,6 @@ void survival_request(
 short survival_arena_count(
 	void);
 char const *survival_arena_map_name(
-	short arena);
-/* its name, for the menus' list */
-wchar_t const *survival_arena_display_name(
 	short arena);
 
 /* whether this game is a survival game */
@@ -52,6 +49,30 @@ back to the main menu, rather than going back to a checkpoint) */
 boolean survival_player_lost(
 	void);
 
+/* the shop (the pause menu's SURVIVAL SHOP): its goods (those the level
+has), their prices, the points to buy them with, and what the last
+purchase did; a good bought for the local player (FALSE: not, and why in
+the status) */
+short survival_shop_good_count(
+	void);
+char const *survival_shop_good_name(
+	short index);
+long survival_shop_good_price(
+	short index);
+long survival_points(
+	void);
+char const *survival_shop_status(
+	void);
+void survival_shop_opened(
+	void);
+boolean survival_shop_buy(
+	short index,
+	short local_player_index);
+/* menu_tags.c: the map loading is a survival game's arena (its own name:
+"b30"), whose pause menu has the shop */
+boolean survival_map_is_arena(
+	char const *map_name);
+
 /* ---------- encounters.c's, for the waves */
 
 long encounter_survival_index(
@@ -65,6 +86,13 @@ short encounter_survival_place(
 	long encounter_index,
 	short squad_index,
 	short count,
-	short first);
+	short first,
+	short actor_palette_index);
+short encounter_survival_actors(
+	long encounter_index,
+	long *actor_indices,
+	short *actor_types,
+	short *living,
+	short maximum);
 
 #endif

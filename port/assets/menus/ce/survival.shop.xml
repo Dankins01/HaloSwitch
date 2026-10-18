@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The port's multiplayer screens, in the PC version's style (tools/port_settings.py) -->
+<menus>
+	<widget name="survival/shop/shop_screen" width="640" height="480" flags="pass_unhandled_to_focused_child pause_game" bitmap="bitmaps/gradient">
+		<on event="b" back="true"/>
+		<on event="back" back="true"/>
+		<child widget="survival/shop/title"/>
+		<child widget="survival/shop/points_text"/>
+		<child widget="survival/shop/shop_list"/>
+		<child widget="survival/shop/status_text"/>
+		<child widget="survival/shop/help_text"/>
+	</widget>
+	<widget name="survival/shop/title" type="text" left="125" top="34" width="260" height="30" text="SURVIVAL SHOP" font="ui\large_ui" color="#FF2896FF" text_flags="no_focus_test">
+	</widget>
+	<widget name="survival/shop/points_text" type="text" left="335" top="34" width="180" height="30" font="ui\large_ui" color="#FFFFFFFF" align="right" text_flags="no_focus_test">
+	</widget>
+	<widget name="survival/shop/shop_list" type="column_list" width="640" height="480" flags="pass_unhandled_to_focused_child up_down_tabs_children">
+		<data input="port survival shop update"/>
+		<on event="created" run="port survival shop initialize"/>
+		<child widget="survival/shop/list_item_0" x="125" y="72"/>
+		<child widget="survival/shop/list_item_1" x="125" y="102"/>
+		<child widget="survival/shop/list_item_2" x="125" y="132"/>
+		<child widget="survival/shop/list_item_3" x="125" y="162"/>
+		<child widget="survival/shop/list_item_4" x="125" y="192"/>
+		<child widget="survival/shop/list_item_5" x="125" y="222"/>
+		<child widget="survival/shop/list_item_6" x="125" y="252"/>
+		<child widget="survival/shop/list_item_7" x="125" y="282"/>
+		<child widget="survival/shop/list_item_8" x="125" y="312"/>
+		<child widget="survival/shop/list_item_9" x="125" y="342"/>
+	</widget>
+	<widget name="survival/shop/list_item_0" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd_top" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/list_item_1" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/list_item_2" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/list_item_3" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/list_item_4" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/list_item_5" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/list_item_6" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/list_item_7" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/list_item_8" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/list_item_9" width="390" height="28" bitmap="bitmaps/sel_list_item_bkd" font="ui\large_ui" color="#FF2896FF" text_y="3">
+		<on event="a" run="port survival shop buy"/>
+		<on event="start" run="port survival shop buy"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+		<child widget="main_menu/new_select/list_item_text" x="25"/>
+		<child widget="survival/shop/price_text" x="275"/>
+		<child widget="main_menu/new_select/list_item_arrows"/>
+	</widget>
+	<widget name="survival/shop/price_text" type="text" width="90" height="28" font="ui\large_ui" color="#FF2896FF" align="right" text_y="3" text_flags="no_focus_test">
+	</widget>
+	<widget name="survival/shop/status_text" type="text" left="125" top="378" width="390" height="24" font="ui\small_ui" color="#FFFFFFFF" align="center" text_flags="no_focus_test">
+	</widget>
+	<widget name="survival/shop/help_text" type="text" left="125" top="406" width="390" height="24" text="A: BUY          B: BACK" font="ui\small_ui" color="#FF2896FF" align="center" text_flags="no_focus_test">
+	</widget>
+</menus>

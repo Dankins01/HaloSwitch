@@ -4,14 +4,15 @@ SURVIVAL.C
 Survival: a campaign level's ground held against waves of its enemies.
 
 New Game's list offers SURVIVAL besides the campaign's levels and the
-multiplayer maps (menu_functions.c). An arena is a level and the ground
-around where its player starts: the game is that level with none of its
-scripts (no cutscenes, no mission) and none of its actors placed. Instead,
-after a few seconds, the first wave comes: actors of the level's own squads
-whose starting locations are near the player, placed on free ground around
-those locations (encounters.c's encounter_survival_place, which spreads
-them as network co-op's extra enemies are spread), and told where the
-player is. A wave killed, the player is healed, the weapons carried are
+multiplayer maps (menu_functions.c): an arena on each campaign level. An
+arena is a level and a piece of its ground, where the players are moved to
+(the structure BSP it is on loaded first), or where the level starts them:
+the game is that level with none of its scripts (no cutscenes, no mission)
+and none of its actors placed. Instead, after a few seconds, the first wave
+comes: actors of the level's own squads whose starting locations are near
+the players, placed on free ground around those locations (encounters.c's
+encounter_survival_place, which spreads them as network co-op's extra
+enemies are spread), and told where the players are. A wave killed, the player is healed, the weapons carried are
 filled with ammunition, the grenades topped up, and after a pause the next,
 larger wave comes. Grunts and Jackals come first; Elites from the second
 wave, more of them as the waves go on; every fifth wave brings Hunters
@@ -39,8 +40,10 @@ Only a local game (one machine) plays survival.
 #include "main/main.h"
 #include "math/real_math.h"
 #include "objects/objects.h"
+#include "physics/collisions.h"
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
+#include "tag_files/tag_groups.h"
 #include "units/units.h"
 
 #include "survival.h"
@@ -51,7 +54,9 @@ Only a local game (one machine) plays survival.
 void platform_log(char const *format, ...);
 char const *config_string(char const *name);
 double config_real(char const *name);
+long config_integer(char const *name);
 void unit_scripting_set_current_vitality_of(long unit_index, real body_vitality, real shield_vitality);
+char *tag_get_name(long tag_index);
 
 /* ---------- constants */
 
@@ -74,14 +79,36 @@ enum
 	SURVIVAL_STRAGGLERS = 3,
 	SURVIVAL_WAVE_TIME_LIMIT = 150 * TICKS_PER_SECOND,
 
+	/* the longest a structure BSP switch is waited for */
+	SURVIVAL_MOVE_TIME_LIMIT = 5 * TICKS_PER_SECOND,
+
 	SURVIVAL_MAXIMUM_WAVE_SIZE = 30,
 	SURVIVAL_MAXIMUM_GRENADES = 2,
+
+	/* the enemies whose deaths are scored (each wave's and those left) */
+	MAXIMUM_SURVIVAL_TRACKED_ACTORS = 160,
+	/* the Marine squads the shop's fireteams come from */
+	MAXIMUM_SURVIVAL_MARINE_SQUADS = 16,
+	SURVIVAL_FIRETEAM_SIZE = 3,
+	/* the points for clearing a wave, times its number */
+	SURVIVAL_WAVE_BONUS = 25,
+	/* the most grenades of a kind the shop's fill to */
+	SURVIVAL_SHOP_MAXIMUM_GRENADES = 4,
 };
+
+/* the nearest a squad's starting location can be to the arena's center
+(world units): its enemies are not placed on top of the players */
+#define SURVIVAL_MINIMUM_DISTANCE 4.0f
+/* how near the arena's center one of an encounter's firing positions must
+be for its squads to be chosen (its actors move only between its firing
+positions: from farther, they would never come to the players), where the
+level has enough such */
+#define SURVIVAL_FIRING_POSITION_RANGE 8.0f
 
 /* what a squad sends: the waves' tiers */
 enum
 {
-	_survival_tier_light = 0, /* grunts, jackals, infection forms */
+	_survival_tier_light = 0, /* grunts, jackals, infection and carrier forms */
 	_survival_tier_heavy, /* elites, combat forms, sentinels */
 	_survival_tier_boss, /* hunters */
 	NUMBER_OF_SURVIVAL_TIERS
@@ -91,6 +118,8 @@ enum
 {
 	_survival_state_none = 0,
 	_survival_state_waiting_for_player,
+	/* waiting for the arena's structure BSP, to move the players there */
+	_survival_state_moving,
 	_survival_state_intermission,
 	_survival_state_wave,
 	_survival_state_over,
@@ -101,12 +130,17 @@ enum
 struct survival_arena_definition
 {
 	char const *map_name;
-	wchar_t const *display_name;
-	/* how far from where the player starts a squad's starting locations can
-	be (world units: about 3 metres), and the most it widens to when the
-	level has too few squads so near */
+	/* where the players stand: on this structure BSP, at this point (above
+	the ground they drop to); else (FALSE) where the level starts them */
+	boolean moved;
+	short structure_bsp_index;
+	real_point3d position;
+	/* how far from there a squad's starting locations can be (world units:
+	about 3 metres), the most it widens to when the level has too few squads
+	so near, and how far above or below (another floor's, else) */
 	real radius;
 	real maximum_radius;
+	real maximum_height;
 };
 
 struct survival_squad
@@ -117,19 +151,82 @@ struct survival_squad
 	short actor_type;
 	short tier;
 	real distance;
+	/* its starting location nearest the arena's center */
+	real_point3d nearest;
+	/* the actor palette's entry its actors are placed as (forced Hunters:
+	another squad's places), NONE for its own */
+	short actor_palette_index;
+};
+
+/* the shop's goods (survival_shop_buy) */
+enum
+{
+	_survival_good_weapon = 0, /* dropped at the player's feet */
+	_survival_good_equipment, /* dropped on the player: a powerup taken at once */
+	_survival_good_frag_grenades,
+	_survival_good_plasma_grenades,
+	_survival_good_ammunition,
+	_survival_good_fireteam,
+};
+
+struct survival_good
+{
+	char const *name;
+	long price;
+	short kind;
+	unsigned long group_tag;
+	char const *tag_name;
 };
 
 /* ---------- globals */
 
+/* the shop's goods, those the level has (its weapons and powerups) offered */
+static struct survival_good const survival_goods[] =
+{
+	{ "MARINE FIRETEAM", 400, _survival_good_fireteam, 0, NULL },
+	{ "OVERSHIELD", 300, _survival_good_equipment, 'eqip', "powerups\\over shield" },
+	{ "ACTIVE CAMOUFLAGE", 350, _survival_good_equipment, 'eqip', "powerups\\active camouflage" },
+	{ "FRAG GRENADES", 75, _survival_good_frag_grenades, 'eqip', "weapons\\frag grenade\\frag grenade" },
+	{ "PLASMA GRENADES", 75, _survival_good_plasma_grenades, 'eqip', "weapons\\plasma grenade\\plasma grenade" },
+	{ "AMMUNITION", 100, _survival_good_ammunition, 0, NULL },
+	{ "PISTOL", 100, _survival_good_weapon, 'weap', "weapons\\pistol\\pistol" },
+	{ "ASSAULT RIFLE", 150, _survival_good_weapon, 'weap', "weapons\\assault rifle\\assault rifle" },
+	{ "PLASMA PISTOL", 100, _survival_good_weapon, 'weap', "weapons\\plasma pistol\\plasma pistol" },
+	{ "PLASMA RIFLE", 200, _survival_good_weapon, 'weap', "weapons\\plasma rifle\\plasma rifle" },
+	{ "NEEDLER", 200, _survival_good_weapon, 'weap', "weapons\\needler\\needler" },
+	{ "SHOTGUN", 300, _survival_good_weapon, 'weap', "weapons\\shotgun\\shotgun" },
+	{ "SNIPER RIFLE", 450, _survival_good_weapon, 'weap', "weapons\\sniper rifle\\sniper rifle" },
+	{ "FUEL ROD GUN", 500, _survival_good_weapon, 'weap', "weapons\\fuel rod gun\\fuel rod" },
+	{ "ROCKET LAUNCHER", 600, _survival_good_weapon, 'weap', "weapons\\rocket launcher\\rocket launcher" },
+};
+
+/* (the places: a ground squad's starting location where the level's
+encounters fight, chosen for their squads' numbers and kinds; in the
+levels' order, as New Game lists them) */
 static struct survival_arena_definition const survival_arenas[NUMBER_OF_SURVIVAL_ARENAS] =
 {
-	{
-		"levels\\b30\\b30",
-		/* (the beach where the Pelicans land) */
-		L"THE SILENT CARTOGRAPHER",
-		30.0f,
-		120.0f,
-	},
+	/* the Pillar of Autumn's cafeteria: Elites and Grunts */
+	{ "levels\\a10\\a10", TRUE, 1, { -17.5f, -6.8f, 0.0f }, 25.0f, 50.0f, 2.5f },
+	/* the first Covenant camp, over the ridge from the lifeboat */
+	{ "levels\\a30\\a30", TRUE, 0, { 53.9f, -14.1f, 87.45f }, 35.0f, 90.0f, 15.0f },
+	/* the canyon below the Truth and Reconciliation: Grunts, Jackals,
+	Elites and a Hunter */
+	{ "levels\\a50\\a50", TRUE, 0, { 3.4f, 12.4f, 98.46f }, 30.0f, 80.0f, 12.0f },
+	/* the beach where the Pelicans land */
+	{ "levels\\b30\\b30", FALSE, 0, { 0.0f, 0.0f, 0.0f }, 30.0f, 120.0f, 100.0f },
+	/* the zigzag canyon before the second bridge: Elites and Hunters */
+	{ "levels\\b40\\b40", TRUE, 2, { 301.9f, -652.3f, 62.14f }, 35.0f, 90.0f, 12.0f },
+	/* the swamp facility's halls: the Flood's first attack */
+	{ "levels\\c10\\c10", TRUE, 2, { -14.4f, -23.9f, 0.0f }, 30.0f, 60.0f, 3.0f },
+	/* the Library's floor: the Flood and its carriers */
+	{ "levels\\c20\\c20", TRUE, 0, { 1.8f, 15.1f, -4.6f }, 30.0f, 60.0f, 3.0f },
+	/* the Covenant and the Flood at once, with a Hunter */
+	{ "levels\\c40\\c40", TRUE, 0, { 38.4f, -61.6f, -0.3f }, 30.0f, 60.0f, 4.0f },
+	/* the Truth and Reconciliation's halls: the Covenant against the Flood */
+	{ "levels\\d20\\d20", TRUE, 3, { 0.5f, -48.6f, -80.8f }, 30.0f, 60.0f, 3.0f },
+	/* the Pillar of Autumn's halls: the Covenant's Hunters, the Flood and
+	Sentinels */
+	{ "levels\\d40\\d40", TRUE, 1, { -3.2f, -2.3f, 0.0f }, 30.0f, 60.0f, 3.0f },
 };
 
 static struct
@@ -158,9 +255,33 @@ static struct
 	short encounter_count;
 	long encounters[MAXIMUM_SURVIVAL_ENCOUNTERS];
 	boolean lost;
+
+	/* the points: each enemy's death scored, by its kind (survival_score) */
+	long points;
+	short tracked_count;
+	struct
+	{
+		long actor_index;
+		short actor_type;
+		short living;
+	} tracked[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+
+	/* the shop: the goods offered (survival_goods' indices), the Marines'
+	squads, and what the last purchase did */
+	short good_count;
+	short goods[NUMBEROF(survival_goods)];
+	short marine_squad_count;
+	struct survival_squad marine_squads[MAXIMUM_SURVIVAL_MARINE_SQUADS];
+	short marine_encounter_count;
+	long marine_encounters[MAXIMUM_SURVIVAL_MARINE_SQUADS];
+	short fireteams;
+	char shop_status[64];
 } survival = { NONE };
 
 /* ---------- private code */
+
+static void survival_shop_stock(
+	void);
 
 static short survival_tier(
 	short actor_type)
@@ -170,6 +291,7 @@ static short survival_tier(
 	case _actor_grunt:
 	case _actor_jackal:
 	case _actor_infection_form:
+	case _actor_carrier_form:
 		return _survival_tier_light;
 	case _actor_elite:
 	case _actor_assassin:
@@ -259,16 +381,115 @@ static void survival_add_encounter(
 		survival.encounters[survival.encounter_count++] = encounter_index;
 }
 
+static void survival_add_marine_encounter(
+	long encounter_index)
+{
+	short i;
+
+	for (i = 0; i < survival.marine_encounter_count; i++)
+	{
+		if (survival.marine_encounters[i] == encounter_index)
+			return;
+	}
+	if (survival.marine_encounter_count < MAXIMUM_SURVIVAL_MARINE_SQUADS)
+		survival.marine_encounters[survival.marine_encounter_count++] = encounter_index;
+}
+
+/* the actor palette's entry of the actor variant named (its tag's name ends
+so), NONE if the level has none */
+static short survival_actor_palette_find(
+	char const *ending)
+{
+	struct tag_block *palette = &global_scenario_get()->ai_actor_palette;
+	size_t ending_length = strlen(ending);
+	short index;
+
+	for (index = 0; index < palette->count; index++)
+	{
+		struct tag_reference *reference = TAG_BLOCK_GET_ELEMENT(palette, index, struct tag_reference);
+		char const *name = reference->index != NONE ? tag_get_name(reference->index) : NULL;
+		size_t length = name ? strlen(name) : 0;
+
+		if (name && length >= ending_length && !_stricmp(name + length - ending_length, ending))
+			return index;
+	}
+	return NONE;
+}
+
+/* every fifth wave's Hunters where none of the level's are near: a pair
+placed in a Covenant squad's places, as Hunters (the level must have them,
+somewhere: their tags are in its map only then) */
+static void survival_force_hunters(
+	void)
+{
+	short palette_index = survival_actor_palette_find("characters\\hunter\\hunter");
+	short added = 0;
+	short i;
+
+	if (survival.tier_counts[_survival_tier_boss] > 0 || palette_index == NONE)
+		return;
+	/* (two hosts at most: a heavy squad's, else a light one's, of the
+	Covenant: Elites, Grunts or Jackals) */
+	for (i = 0; i < survival.squad_count && added < 2 && survival.squad_count < MAXIMUM_SURVIVAL_SQUADS; i++)
+	{
+		struct survival_squad const *host = &survival.squads[i];
+
+		if (host->actor_palette_index == NONE &&
+			(host->actor_type == _actor_elite || host->actor_type == _actor_grunt || host->actor_type == _actor_jackal))
+		{
+			struct survival_squad *entry = &survival.squads[survival.squad_count++];
+
+			*entry = *host;
+			entry->actor_type = _actor_hunter;
+			entry->tier = _survival_tier_boss;
+			entry->actor_palette_index = palette_index;
+			survival.tier_counts[_survival_tier_boss]++;
+			added++;
+		}
+	}
+	if (added)
+		platform_log("survival: Hunters forced into %d squads' places", added);
+}
+
 /* the level's squads of enemies whose starting locations are within
-`radius` of the arena's center, in the structure the player is in */
+`radius` of the arena's center (but not on top of it) and within
+`maximum_height` above or below it, in the structure the player is in */
+/* whether one of the encounter's firing positions is near the arena's
+center */
+static boolean survival_encounter_fights_near(
+	struct encounter_definition *encounter,
+	real maximum_height)
+{
+	short index;
+
+	for (index = 0; index < encounter->firing_positions.count; index++)
+	{
+		struct firing_position_definition *position = TAG_BLOCK_GET_ELEMENT(&encounter->firing_positions, index,
+			struct firing_position_definition);
+		real height = position->position.z - survival.center.z;
+
+		if (survival_distance_squared(&position->position, &survival.center) <=
+				SURVIVAL_FIRING_POSITION_RANGE * SURVIVAL_FIRING_POSITION_RANGE &&
+			height <= maximum_height && height >= -maximum_height)
+		{
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
 static void survival_select_squads(
-	real radius)
+	real radius,
+	real maximum_height,
+	boolean fighting_near)
 {
 	struct scenario *scenario = global_scenario_get();
 	short encounter_index;
 
 	survival.squad_count = 0;
 	survival.encounter_count = 0;
+	survival.marine_squad_count = 0;
+	survival.marine_encounter_count = 0;
 	csmemset(survival.tier_counts, 0, sizeof(survival.tier_counts));
 	for (encounter_index = 0; encounter_index < scenario->ai_encounters.count; encounter_index++)
 	{
@@ -285,6 +506,17 @@ static void survival_select_squads(
 		datum_index = encounter_survival_index(encounter_index);
 		if (datum_index == NONE)
 			continue;
+		/* (an enemy encounter must fight near; a Marines' may come from
+		farther) */
+		if (fighting_near && !survival_encounter_fights_near(encounter, maximum_height))
+		{
+			boolean marines = FALSE;
+
+			for (squad_index = 0; squad_index < encounter->squads.count && !marines; squad_index++)
+				marines = encounter_survival_squad_actor_type(encounter_index, squad_index) == _actor_marine;
+			if (!marines)
+				continue;
+		}
 		for (squad_index = 0; squad_index < encounter->squads.count; squad_index++)
 		{
 			struct squad_definition *squad = TAG_BLOCK_GET_ELEMENT(&encounter->squads, squad_index,
@@ -293,8 +525,40 @@ static void survival_select_squads(
 			short tier = survival_tier(actor_type);
 			real nearest = radius * radius;
 			boolean near = FALSE;
+			real_point3d nearest_point = { 0 };
 			short location_index;
 
+			if (actor_type == _actor_marine && squad->starting_locations.count > 0 &&
+				survival.marine_squad_count < MAXIMUM_SURVIVAL_MARINE_SQUADS)
+			{
+				/* (the shop's fireteams: the Marines' squads that are near,
+				widely) */
+				short location_index;
+
+				for (location_index = 0; location_index < squad->starting_locations.count; location_index++)
+				{
+					struct actor_starting_location *location = TAG_BLOCK_GET_ELEMENT(&squad->starting_locations,
+						location_index, struct actor_starting_location);
+					real height = location->position.z - survival.center.z;
+
+					if (survival_distance_squared(&location->position, &survival.center) <= 4.0f * radius * radius &&
+						height <= maximum_height && height >= -maximum_height)
+					{
+						struct survival_squad *entry = &survival.marine_squads[survival.marine_squad_count++];
+
+						csmemset(entry, 0, sizeof(*entry));
+						entry->encounter_index = datum_index;
+						entry->encounter_absolute_index = encounter_index;
+						entry->squad_index = squad_index;
+						entry->actor_type = actor_type;
+						entry->actor_palette_index = NONE;
+						entry->nearest = location->position;
+						survival_add_marine_encounter(datum_index);
+						break;
+					}
+				}
+				continue;
+			}
 			if (tier == NONE || squad->starting_locations.count == 0)
 				continue;
 			for (location_index = 0; location_index < squad->starting_locations.count; location_index++)
@@ -302,10 +566,13 @@ static void survival_select_squads(
 				struct actor_starting_location *location = TAG_BLOCK_GET_ELEMENT(&squad->starting_locations,
 					location_index, struct actor_starting_location);
 				real distance = survival_distance_squared(&location->position, &survival.center);
+				real height = location->position.z - survival.center.z;
 
-				if (distance <= nearest)
+				if (distance <= nearest && height <= maximum_height && height >= -maximum_height &&
+					distance >= SURVIVAL_MINIMUM_DISTANCE * SURVIVAL_MINIMUM_DISTANCE)
 				{
 					nearest = distance;
+					nearest_point = location->position;
 					near = TRUE;
 				}
 			}
@@ -320,6 +587,8 @@ static void survival_select_squads(
 				entry->actor_type = actor_type;
 				entry->tier = tier;
 				entry->distance = square_root(nearest);
+				entry->nearest = nearest_point;
+				entry->actor_palette_index = NONE;
 				survival.tier_counts[tier]++;
 				survival_add_encounter(datum_index);
 			}
@@ -376,6 +645,84 @@ static short survival_living_count(
 	for (i = 0; i < survival.encounter_count; i++)
 		count += encounter_survival_living_count(survival.encounters[i]);
 	return count;
+}
+
+/* the points for one of a kind of enemy's deaths */
+static long survival_kill_points(
+	short actor_type)
+{
+	switch (actor_type)
+	{
+	case _actor_infection_form: return 3;
+	case _actor_grunt: return 10;
+	case _actor_carrier_form: return 10;
+	case _actor_jackal: return 15;
+	case _actor_combat_form: return 30;
+	case _actor_sentinel: return 30;
+	case _actor_elite: return 50;
+	case _actor_assassin: return 60;
+	case _actor_hunter: return 150;
+	default: return 0;
+	}
+}
+
+/* the enemies' deaths since the last look, scored by their kinds: each of
+the encounters' actors' living units (a swarm's) against the last look's,
+an actor gone counting as all of its dead; the new ones looked at from now
+on */
+static void survival_score(
+	void)
+{
+	long actor_indices[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+	short actor_types[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+	short living[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+	short count = 0;
+	short i, j;
+
+	for (i = 0; i < survival.encounter_count && count < MAXIMUM_SURVIVAL_TRACKED_ACTORS; i++)
+	{
+		count += encounter_survival_actors(survival.encounters[i], actor_indices + count, actor_types + count,
+			living + count, (short)(MAXIMUM_SURVIVAL_TRACKED_ACTORS - count));
+	}
+	for (i = 0; i < survival.tracked_count; i++)
+	{
+		short now = 0;
+
+		for (j = 0; j < count; j++)
+		{
+			if (actor_indices[j] == survival.tracked[i].actor_index)
+			{
+				now = living[j];
+				break;
+			}
+		}
+		if (now < survival.tracked[i].living)
+			survival.points += (survival.tracked[i].living - now) * survival_kill_points(survival.tracked[i].actor_type);
+		survival.tracked[i].living = now;
+	}
+	/* (the dead let go; the new looked at) */
+	for (i = j = 0; i < survival.tracked_count; i++)
+	{
+		if (survival.tracked[i].living > 0)
+			survival.tracked[j++] = survival.tracked[i];
+	}
+	survival.tracked_count = j;
+	for (j = 0; j < count; j++)
+	{
+		boolean known = FALSE;
+
+		if (living[j] <= 0)
+			continue;
+		for (i = 0; i < survival.tracked_count && !known; i++)
+			known = survival.tracked[i].actor_index == actor_indices[j];
+		if (!known && survival.tracked_count < MAXIMUM_SURVIVAL_TRACKED_ACTORS)
+		{
+			survival.tracked[survival.tracked_count].actor_index = actor_indices[j];
+			survival.tracked[survival.tracked_count].actor_type = actor_types[j];
+			survival.tracked[survival.tracked_count].living = living[j];
+			survival.tracked_count++;
+		}
+	}
 }
 
 static void survival_spawn_wave(
@@ -439,12 +786,13 @@ static void survival_spawn_wave(
 		}
 		group = (short)MIN(group, budget);
 		placed = encounter_survival_place(squad->encounter_index, squad->squad_index, group,
-			placed_by_squad[squad_index]);
+			placed_by_squad[squad_index], squad->actor_palette_index);
 		placed_by_squad[squad_index] += group;
 		survival.wave_placed += placed;
 		budget -= group;
 	}
 	survival.wave_start_living = survival.wave_living = survival_living_count();
+	survival_score();
 	survival_reveal_player();
 	platform_log("survival: wave %d: %d enemies placed", survival.wave, survival.wave_placed);
 }
@@ -487,6 +835,73 @@ static void survival_set_state(
 	survival.state_time = game_time_get();
 }
 
+/* the ground under the point (a little above the point's own height, so a
+point on the ground stays): a little above it */
+static void survival_ground(
+	real_point3d *point)
+{
+	struct collision_result collision;
+	real_point3d from = *point;
+	real_vector3d down = { 0.0f, 0.0f, -6.0f };
+
+	from.z += 0.5f;
+	if (collision_test_vector(FLAG(_collision_test_front_facing_surfaces_bit) | FLAG(_collision_test_structure_bit) |
+		FLAG(_collision_test_objects_bit) | FLAG(_collision_test_objects_scenery_bit), &from, &down, NONE, &collision))
+	{
+		point->z = collision.point.z + 0.2f;
+	}
+}
+
+/* the players to the arena's ground (split screen's side by side), facing
+the point given */
+static void survival_move_players(
+	real_point3d const *position,
+	real_point3d const *facing_point)
+{
+	long units[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS];
+	short unit_count = survival_player_units(units);
+	real_vector3d forward;
+	short i;
+
+	forward.i = facing_point->x - position->x;
+	forward.j = facing_point->y - position->y;
+	forward.k = 0.0f;
+	if (normalize3d(&forward) == 0.0f)
+	{
+		forward.i = 1.0f;
+		forward.j = 0.0f;
+	}
+	for (i = 0; i < unit_count; i++)
+	{
+		struct unit_datum *unit = unit_get(units[i]);
+		long player_index = player_index_from_unit_index(units[i]);
+		real_point3d place = *position;
+
+		/* (the second to the first's left) */
+		place.x -= forward.j * 1.0f * (real)i;
+		place.y += forward.i * 1.0f * (real)i;
+		survival_ground(&place);
+		if (unit->object.parent_object_index != NONE)
+			unit_exit_seat_end(units[i]);
+		object_reset(units[i]);
+		unit->unit.desired_facing_vector = forward;
+		unit->unit.desired_aiming_vector = forward;
+		unit->unit.desired_looking_vector = forward;
+		if (player_index != NONE)
+		{
+			struct player_datum *player = player_get(player_index);
+
+			player_teleport(player_index, NONE, &place);
+			if (player->local_player_index != NONE)
+				player_control_set_facing(player->local_player_index, &forward);
+		}
+		else
+		{
+			object_set_position(units[i], &place, &forward, NULL);
+		}
+	}
+}
+
 static void survival_begin(
 	long unit_index)
 {
@@ -494,16 +909,49 @@ static void survival_begin(
 	real radius = arena->radius;
 	short tier;
 
-	survival.center = object_get(unit_index)->object.position;
+	survival.center = arena->moved ? arena->position : object_get(unit_index)->object.position;
 	survival.seed = (unsigned long)game_time_get() * 2654435761u ^ 0x5eed5eedu;
+	/* (the squads of encounters that fight near first; failing enough, any
+	near) */
 	do
 	{
-		survival_select_squads(radius);
+		survival_select_squads(radius, arena->maximum_height, TRUE);
 		if (survival.tier_counts[_survival_tier_light] + survival.tier_counts[_survival_tier_heavy] >= 4)
 			break;
 		radius *= 1.5f;
 	}
 	while (radius <= arena->maximum_radius);
+	if (survival.tier_counts[_survival_tier_light] + survival.tier_counts[_survival_tier_heavy] < 4)
+	{
+		radius = arena->radius;
+		do
+		{
+			survival_select_squads(radius, arena->maximum_height, FALSE);
+			if (survival.tier_counts[_survival_tier_light] + survival.tier_counts[_survival_tier_heavy] >= 4)
+				break;
+			radius *= 1.5f;
+		}
+		while (radius <= arena->maximum_radius);
+	}
+	survival_force_hunters();
+	survival_shop_stock();
+	if (arena->moved)
+	{
+		/* (facing where the squads are, on average) */
+		real_point3d facing = survival.center;
+
+		if (survival.squad_count > 0)
+		{
+			facing.x = facing.y = facing.z = 0.0f;
+			for (tier = 0; tier < survival.squad_count; tier++)
+			{
+				facing.x += survival.squads[tier].nearest.x / (real)survival.squad_count;
+				facing.y += survival.squads[tier].nearest.y / (real)survival.squad_count;
+				facing.z += survival.squads[tier].nearest.z / (real)survival.squad_count;
+			}
+		}
+		survival_move_players(&arena->position, &facing);
+	}
 	platform_log("survival: arena at %.1f %.1f %.1f, %d squads within %.0f (light %d, heavy %d, boss %d), %d encounters",
 		survival.center.x, survival.center.y, survival.center.z, survival.squad_count, radius,
 		survival.tier_counts[_survival_tier_light], survival.tier_counts[_survival_tier_heavy],
@@ -521,6 +969,11 @@ static void survival_begin(
 	}
 	survival.wave = 1;
 	survival.kills = 0;
+	/* (debug.survival_points: a test's) */
+	survival.points = config_integer("debug.survival_points");
+	survival.tracked_count = 0;
+	survival.fireteams = 0;
+	survival.shop_status[0] = 0;
 	survival_set_state(_survival_state_intermission);
 	if (survival.squad_count == 0)
 	{
@@ -551,11 +1004,6 @@ char const *survival_arena_map_name(
 	return VALID_INDEX(arena, NUMBER_OF_SURVIVAL_ARENAS) ? survival_arenas[arena].map_name : NULL;
 }
 
-wchar_t const *survival_arena_display_name(
-	short arena)
-{
-	return VALID_INDEX(arena, NUMBER_OF_SURVIVAL_ARENAS) ? survival_arenas[arena].display_name : L"";
-}
 
 boolean survival_active(
 	void)
@@ -645,16 +1093,33 @@ void survival_update(
 			survival.lost = TRUE;
 			if (survival.state == _survival_state_wave)
 				survival.kills += survival.wave_start_living - survival.wave_living;
-			survival_message("YOU SURVIVED %d WAVE%s, %ld KILLS", survival.wave - 1,
-				survival.wave - 1 == 1 ? "" : "S", survival.kills);
+			survival_score();
+			survival_message("YOU SURVIVED %d WAVE%s: %ld KILLS, %ld POINTS", survival.wave - 1,
+				survival.wave - 1 == 1 ? "" : "S", survival.kills, survival.points);
 		}
 		return;
 	}
 	switch (survival.state)
 	{
 	case _survival_state_waiting_for_player:
-		if (unit_index != NONE)
+		if (unit_index == NONE)
+			break;
+		if (survival_arenas[survival.arena].moved &&
+			global_structure_bsp_index != survival_arenas[survival.arena].structure_bsp_index)
+		{
+			main_switch_structure_bsp(survival_arenas[survival.arena].structure_bsp_index);
+			survival_set_state(_survival_state_moving);
+			break;
+		}
+		survival_begin(unit_index);
+		break;
+
+	case _survival_state_moving:
+		if (global_structure_bsp_index == survival_arenas[survival.arena].structure_bsp_index ||
+			now - survival.state_time >= SURVIVAL_MOVE_TIME_LIMIT)
+		{
 			survival_begin(unit_index);
+		}
 		break;
 
 	case _survival_state_intermission:
@@ -663,7 +1128,7 @@ void survival_update(
 
 		if (now - survival.state_time >= delay)
 		{
-			survival_message("WAVE %d", survival.wave);
+			survival_message("WAVE %d (%ld POINTS)", survival.wave, survival.points);
 			survival_spawn_wave();
 			survival.last_count_time = survival.last_reveal_time = now;
 			survival_set_state(_survival_state_wave);
@@ -692,6 +1157,7 @@ void survival_update(
 			short living = survival_living_count();
 
 			survival.last_count_time = now;
+			survival_score();
 			if (living != survival.wave_living)
 				platform_log("survival: wave %d: %d of %d left", survival.wave, living, survival.wave_start_living);
 			survival.wave_living = living;
@@ -699,8 +1165,9 @@ void survival_update(
 				now - survival.state_time >= SURVIVAL_WAVE_TIME_LIMIT)
 			{
 				survival.kills += survival.wave_start_living - living;
-				survival_message("WAVE %d CLEARED: next wave in %d seconds", survival.wave,
-					SURVIVAL_INTERMISSION / TICKS_PER_SECOND);
+				survival.points += SURVIVAL_WAVE_BONUS * survival.wave;
+				survival_message("WAVE %d CLEARED: +%d, %ld POINTS. Next wave in %d seconds", survival.wave,
+					SURVIVAL_WAVE_BONUS * survival.wave, survival.points, SURVIVAL_INTERMISSION / TICKS_PER_SECOND);
 				survival_resupply();
 				survival.wave++;
 				survival_set_state(_survival_state_intermission);
@@ -715,9 +1182,237 @@ boolean survival_player_lost(
 {
 	if (!survival.active)
 		return FALSE;
-	platform_log("survival: over, %d waves survived, %ld kills", MAX(survival.wave - 1, 0), survival.kills);
+	platform_log("survival: over, %d waves survived, %ld kills, %ld points", MAX(survival.wave - 1, 0), survival.kills,
+		survival.points);
 	survival.active = FALSE;
 	survival.state = _survival_state_none;
 	main_goto_main_menu();
 	return TRUE;
+}
+
+/* ---------- the shop (menu_functions.c's SURVIVAL SHOP, the pause menu's) */
+
+/* the goods the level has */
+static void survival_shop_stock(
+	void)
+{
+	short index;
+
+	survival.good_count = 0;
+	for (index = 0; index < NUMBEROF(survival_goods); index++)
+	{
+		struct survival_good const *good = &survival_goods[index];
+		boolean stocked;
+
+		switch (good->kind)
+		{
+		case _survival_good_fireteam:
+			stocked = survival.marine_squad_count > 0;
+			break;
+		case _survival_good_ammunition:
+			stocked = TRUE;
+			break;
+		default:
+			stocked = tag_loaded(good->group_tag, good->tag_name) != NONE;
+			break;
+		}
+		if (stocked)
+			survival.goods[survival.good_count++] = index;
+	}
+}
+
+static void survival_shop_say(
+	char const *format,
+	...)
+{
+	va_list arguments;
+
+	va_start(arguments, format);
+	_vsnprintf(survival.shop_status, sizeof(survival.shop_status) - 1, format, arguments);
+	va_end(arguments);
+	survival.shop_status[sizeof(survival.shop_status) - 1] = 0;
+	platform_log("survival: shop: %s", survival.shop_status);
+}
+
+/* a fireteam of the level's Marines, from the next of their squads near,
+following the players; FALSE if none could be placed */
+static boolean survival_shop_fireteam(
+	void)
+{
+	short tried;
+
+	for (tried = 0; tried < survival.marine_squad_count; tried++)
+	{
+		struct survival_squad const *squad =
+			&survival.marine_squads[(survival.fireteams + tried) % survival.marine_squad_count];
+		short placed = encounter_survival_place(squad->encounter_index, squad->squad_index, SURVIVAL_FIRETEAM_SIZE,
+			(short)(survival.fireteams / survival.marine_squad_count * SURVIVAL_FIRETEAM_SIZE), NONE);
+
+		if (placed > 0)
+		{
+			long reference = (long)DATUM_INDEX_TO_ABSOLUTE_INDEX(squad->encounter_index);
+
+			ai_scripting_follow_target_players(reference);
+			ai_scripting_follow_distance(reference, 1.5f);
+			survival.fireteams++;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+short survival_shop_good_count(
+	void)
+{
+	return survival.active ? survival.good_count : 0;
+}
+
+char const *survival_shop_good_name(
+	short index)
+{
+	return VALID_INDEX(index, survival.good_count) ? survival_goods[survival.goods[index]].name : "";
+}
+
+long survival_shop_good_price(
+	short index)
+{
+	return VALID_INDEX(index, survival.good_count) ? survival_goods[survival.goods[index]].price : 0;
+}
+
+long survival_points(
+	void)
+{
+	return survival.points;
+}
+
+char const *survival_shop_status(
+	void)
+{
+	return survival.shop_status;
+}
+
+void survival_shop_opened(
+	void)
+{
+	survival.shop_status[0] = 0;
+}
+
+boolean survival_shop_buy(
+	short index,
+	short local_player_index)
+{
+	struct survival_good const *good;
+	long player_index = local_player_get_player_index(local_player_index);
+	long unit_index = player_index != NONE ? player_get(player_index)->unit_index : NONE;
+	struct unit_datum *unit = unit_index != NONE ? unit_try_and_get(unit_index) : NULL;
+	boolean bought = FALSE;
+
+	if (!survival.active || !VALID_INDEX(index, survival.good_count) ||
+		(survival.state != _survival_state_intermission && survival.state != _survival_state_wave))
+	{
+		survival_shop_say("THE SHOP IS CLOSED");
+		return FALSE;
+	}
+	good = &survival_goods[survival.goods[index]];
+	if (!unit)
+	{
+		survival_shop_say("NOT WHILE YOU ARE DEAD");
+		return FALSE;
+	}
+	if (survival.points < good->price)
+	{
+		survival_shop_say("%s: %ld MORE POINTS NEEDED", good->name, good->price - survival.points);
+		return FALSE;
+	}
+	switch (good->kind)
+	{
+	case _survival_good_weapon:
+	case _survival_good_equipment:
+	{
+		long tag_index = tag_loaded(good->group_tag, good->tag_name);
+		struct object_placement_data data;
+
+		if (tag_index == NONE)
+			break;
+		object_placement_data_new(&data, tag_index, NONE);
+		data.position = unit->object.position;
+		/* (a weapon in front, to be picked up; a powerup on the player, taken
+		at once) */
+		if (good->kind == _survival_good_weapon)
+		{
+			data.position.x += unit->object.forward.i * 0.4f;
+			data.position.y += unit->object.forward.j * 0.4f;
+			data.position.z += 0.1f;
+		}
+		bought = object_new(&data) != NONE;
+		if (bought)
+		{
+			survival_shop_say(good->kind == _survival_good_weapon ? "%s: AT YOUR FEET" : "%s: YOURS", good->name);
+		}
+		break;
+	}
+	case _survival_good_frag_grenades:
+	case _survival_good_plasma_grenades:
+	{
+		short kind = good->kind == _survival_good_frag_grenades ? 0 : 1;
+
+		if (unit->unit.grenade_counts[kind] >= SURVIVAL_SHOP_MAXIMUM_GRENADES)
+		{
+			survival_shop_say("%s: YOU HAVE %d", good->name, SURVIVAL_SHOP_MAXIMUM_GRENADES);
+			return FALSE;
+		}
+		unit->unit.grenade_counts[kind] = (char)MIN(unit->unit.grenade_counts[kind] + 2, SURVIVAL_SHOP_MAXIMUM_GRENADES);
+		survival_shop_say("%s: YOU HAVE %d", good->name, unit->unit.grenade_counts[kind]);
+		bought = TRUE;
+		break;
+	}
+	case _survival_good_ammunition:
+	{
+		short i;
+
+		for (i = 0; i < MAXIMUM_WEAPONS_PER_UNIT; i++)
+		{
+			if (unit->unit.weapon_object_indices[i] != NONE)
+			{
+				short rounds[2] = { SHORT_MAX, SHORT_MAX };
+
+				weapon_set_total_rounds(unit->unit.weapon_object_indices[i], rounds);
+			}
+		}
+		survival_shop_say("AMMUNITION: YOUR WEAPONS ARE FULL");
+		bought = TRUE;
+		break;
+	}
+	case _survival_good_fireteam:
+		bought = survival_shop_fireteam();
+		survival_shop_say(bought ? "MARINE FIRETEAM: ON THE WAY" : "MARINE FIRETEAM: NONE CAN COME");
+		break;
+	}
+	if (!bought)
+		return FALSE;
+	survival.points -= good->price;
+	return TRUE;
+}
+
+/* the map loading is an arena's: the menus' request's, the restart's, or a
+test's (debug.survival); map_name is the map's own name ("b30") */
+boolean survival_map_is_arena(
+	char const *map_name)
+{
+	short arena = survival.requested_arena;
+	short index;
+
+	if (arena == NONE && survival.restart)
+		arena = survival.arena;
+	for (index = 0; index < NUMBER_OF_SURVIVAL_ARENAS; index++)
+	{
+		char const *name = survival_arenas[index].map_name;
+		char const *short_name = strrchr(name, '\\') ? strrchr(name, '\\') + 1 : name;
+		boolean tested = arena == NONE && config_string("debug.survival")[0] &&
+			!_stricmp(config_string("debug.survival"), short_name);
+
+		if ((index == arena || tested) && map_name && !_stricmp(map_name, short_name))
+			return TRUE;
+	}
+	return FALSE;
 }

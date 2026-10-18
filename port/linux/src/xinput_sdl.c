@@ -503,7 +503,9 @@ network tests (port/linux/game/network_test.c), different for each seed:
 it walks and strafes in circles, turns, fires every few seconds, jumps now
 and then and throws a grenade every seven seconds; "look:<seed>" stands
 still, only turning and looking up and down (where remote players aim and
-whether they stand) */
+whether they stand); "press:<seconds>=<button>,..." pushes each button for
+a moment that many seconds after the start (a, b, x, y, start, back, up,
+down, left, right: the menus driven, in the automated tests) */
 static int test_input_holding_action;
 static Uint64 test_input_holding_action_since;
 
@@ -517,11 +519,49 @@ void test_input_hold_action(int hold)
 	test_input_holding_action = hold;
 }
 
+#define TEST_INPUT_PRESSES 64
+#define TEST_INPUT_PRESS_MS 150
+
+static struct
+{
+	Uint64 at_ms;
+	char button[8];
+} test_input_presses[TEST_INPUT_PRESSES];
+static int test_input_press_count;
+
+/* "press:...": the buttons pushed now */
+static void test_input_press(XINPUT_GAMEPAD *pad)
+{
+	static char const *const names[] = { "a", "b", "x", "y" };
+	static char const *const digital_names[] = { "up", "down", "left", "right", "start", "back" };
+	static WORD const digital[] = { XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT,
+		XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_BACK };
+	Uint64 now = SDL_GetTicks();
+	int index, name;
+
+	for (index = 0; index < test_input_press_count; index++)
+	{
+		if (now < test_input_presses[index].at_ms || now >= test_input_presses[index].at_ms + TEST_INPUT_PRESS_MS)
+			continue;
+		for (name = 0; name < 4; name++)
+		{
+			if (!strcmp(test_input_presses[index].button, names[name]))
+				pad->bAnalogButtons[XINPUT_GAMEPAD_A + name] = 255;
+		}
+		for (name = 0; name < 6; name++)
+		{
+			if (!strcmp(test_input_presses[index].button, digital_names[name]))
+				pad->wButtons |= digital[name];
+		}
+	}
+}
+
 static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 {
 	static int checked;
 	static int seed = -1;
 	static int looking;
+	static int pressing;
 	double t;
 
 	if (!checked)
@@ -529,6 +569,30 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 		const char *setting = config_string("debug.test_input");
 
 		checked = 1;
+		if (!strncmp(setting, "press:", 6))
+		{
+			const char *at = setting + 6;
+
+			pressing = 1;
+			while (*at && test_input_press_count < TEST_INPUT_PRESSES)
+			{
+				double seconds = strtod(at, (char **)&at);
+				int length = 0;
+
+				if (*at != '=')
+					break;
+				at++;
+				while (at[length] && at[length] != ',' && length < 7)
+					length++;
+				test_input_presses[test_input_press_count].at_ms = (Uint64)(seconds * 1000.0);
+				memcpy(test_input_presses[test_input_press_count].button, at, length);
+				test_input_presses[test_input_press_count].button[length] = 0;
+				test_input_press_count++;
+				at += length;
+				if (*at == ',')
+					at++;
+			}
+		}
 		if (!strncmp(setting, "bot:", 4))
 			seed = atoi(setting + 4);
 		else if (!strcmp(setting, "bot"))
@@ -538,6 +602,11 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 			seed = atoi(setting + 5);
 			looking = 1;
 		}
+	}
+	if (pressing)
+	{
+		test_input_press(pad);
+		return;
 	}
 	if (seed < 0)
 		return;

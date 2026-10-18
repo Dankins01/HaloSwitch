@@ -172,24 +172,42 @@ not continue a saved game of one player.
 
 New Game's chooser, above its list, has SURVIVAL after SINGLEPLAYER and
 MULTIPLAYER: a campaign level's ground held against waves of its enemies
-(`port/linux/game/survival.c`). The arena so far is the beach of The Silent
-Cartographer, open whatever the profile has reached. None of the level's
-scripts run (no cutscenes, no mission) and none of its own enemies are
-placed. After a few seconds the first wave comes: the level's own Covenant
-from near the beach, placed around it and sent at the player. When a wave is
-killed (or has lasted two and a half minutes, or its last three have held
-out for a minute), the player is healed, the weapons carried are filled
-with ammunition and the grenades topped up to two, and 12 seconds later a
-larger wave comes: Grunts first, Elites from the second wave, more of them
-as the waves go on. The difficulty chosen sets the enemies' strength as in
-the campaign, and Heroic and Legendary add 2 and 4 enemies to each wave.
-There is one life: dying ends the game, with the waves survived and the
-enemies killed on the HUD, and goes back to the main menu. In split screen
-co-op, a player who dies comes back while the other lives. A survival game
-is never saved, so it never takes the place of the campaign's saved game;
-the pause menu's restart starts it again from the first wave. Only a game
-on one machine plays survival: the Map screen of a network game has no
-SURVIVAL.
+(`port/linux/game/survival.c`). There is an arena on each of the ten
+levels, all open whatever the profile has reached: the Pillar of Autumn's
+cafeteria, the first Covenant camp on Halo, the canyon below the Truth and
+Reconciliation, the Silent Cartographer's beach, the zigzag canyon of
+Assault on the Control Room, the halls where 343 Guilty Spark's Flood
+first attack, the Library's floor, the Covenant and the Flood together in
+Two Betrayals, the Truth and Reconciliation's halls in Keyes, and the
+Pillar of Autumn's halls in The Maw. None of the level's scripts run (no
+cutscenes, no mission) and none of its own enemies are placed; the players
+are moved to the arena. After a few seconds the first wave comes: the
+level's own enemies from around the arena, placed there and sent at the
+players. When a wave is killed (or has lasted two and a half minutes, or
+its last three have held out for a minute), the players are healed, the
+weapons carried are filled with ammunition and the grenades topped up to
+two, and 12 seconds later a larger wave comes: Grunts, Jackals and Flood
+infection forms first, Elites, combat forms and Sentinels from the second
+wave, more of them as the waves go on, and every fifth wave Hunters, on
+the levels that have Hunters anywhere (where none are near the arena, they
+come in a Covenant squad's places). The difficulty chosen sets the
+enemies' strength as in the campaign, and Heroic and Legendary add 2 and 4
+enemies to each wave.
+
+Each enemy killed earns points (a Grunt 10, an Elite 50, a Hunter 150), and
+each wave cleared 25 times its number. In the pause menu, SURVIVAL SHOP (in
+the place of RESTART AT SAVE POINT) spends them, while the game is paused:
+a fireteam of the level's Marines that follows the players, an overshield,
+active camouflage, two more grenades of a kind, a full load of ammunition,
+and the level's own weapons (from the pistol for 100 to the rocket
+launcher for 600), dropped at the player's feet to be picked up. There is
+one life: dying ends the game, with the waves survived, the kills and the
+points on the HUD, and goes back to the main menu. In split screen co-op,
+a player who dies comes back while the other lives. A survival game is
+never saved, so it never takes the place of the campaign's saved game;
+the pause menu's RESTART LEVEL starts it again from the first wave. Only a
+game on one machine plays survival: the Map screen of a network game has
+no SURVIVAL.
 
 Network games have split screen too: up to 4 players on each computer. In
 the game lobby, another controller presses START to join, and the new
