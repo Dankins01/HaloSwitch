@@ -31,6 +31,7 @@ Only a local game (one machine) plays survival.
 
 #include "cseries.h"
 #include "ai/actor_types.h"
+#include "ai/actors.h"
 #include "ai/ai_scenario_definitions.h"
 #include "ai/ai_script.h"
 #include "game/game.h"
@@ -44,6 +45,7 @@ Only a local game (one machine) plays survival.
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
 #include "tag_files/tag_groups.h"
+#include "units/unit_definitions.h"
 #include "units/units.h"
 
 #include "survival.h"
@@ -90,6 +92,9 @@ enum
 	MAXIMUM_SURVIVAL_TRACKED_ACTORS = 160,
 	/* the Marine squads the shop's fireteams come from */
 	MAXIMUM_SURVIVAL_MARINE_SQUADS = 16,
+	/* the waves' vehicles kept: past these, the oldest empty one out of
+	sight goes as another comes */
+	MAXIMUM_SURVIVAL_VEHICLES = 4,
 	SURVIVAL_FIRETEAM_SIZE = 3,
 	/* the points for clearing a wave, times its number */
 	SURVIVAL_WAVE_BONUS = 25,
@@ -291,6 +296,10 @@ static struct
 	long marine_encounters[MAXIMUM_SURVIVAL_MARINE_SQUADS];
 	short fireteams;
 	char shop_status[64];
+
+	/* the waves' vehicles, oldest first */
+	short vehicle_count;
+	long vehicles[MAXIMUM_SURVIVAL_VEHICLES];
 } survival = { NONE };
 
 /* ---------- private code */
@@ -740,6 +749,186 @@ static void survival_score(
 	}
 }
 
+static boolean survival_vehicle_place(struct unit_datum *unit, real length, real width, real_point3d *place,
+	real_vector3d *forward);
+
+/* the Covenant's vehicles a wave can bring, from its first wave on, on an
+arena open enough (its height), each driven by one of the wave's Elites */
+static struct
+{
+	char const *name;
+	char const *tag_name;
+	short first_wave;
+	real length;
+	real width;
+} const survival_vehicles[] =
+{
+	{ "GHOST", "vehicles\\ghost\\ghost", 3, 2.6f, 1.6f },
+	{ "BANSHEE", "vehicles\\banshee\\banshee", 5, 3.2f, 3.0f },
+	{ "WRAITH", "vehicles\\wraith\\wraith", 7, 5.0f, 3.4f },
+};
+
+/* the arenas with room for vehicles: the open ones */
+#define SURVIVAL_VEHICLE_ARENA_HEIGHT 10.0f
+/* how far from any player a vehicle comes */
+#define SURVIVAL_VEHICLE_PLAYER_DISTANCE 8.0f
+
+/* the vehicle kept with the waves': room made by letting go of the gone,
+then of the oldest empty one no player sees (else the oldest kept is just
+forgotten) */
+static void survival_vehicle_keep(
+	long vehicle_index)
+{
+	short i, j;
+
+	for (i = j = 0; i < survival.vehicle_count; i++)
+	{
+		if (object_try_and_get_and_verify_type(survival.vehicles[i], _object_mask_vehicle))
+			survival.vehicles[j++] = survival.vehicles[i];
+	}
+	survival.vehicle_count = j;
+	if (survival.vehicle_count == MAXIMUM_SURVIVAL_VEHICLES)
+	{
+		for (i = 0; i < survival.vehicle_count; i++)
+		{
+			struct object_datum *vehicle = object_get(survival.vehicles[i]);
+
+			if (vehicle->object.first_child_object_index == NONE && !object_visible_to_any_player(survival.vehicles[i]))
+			{
+				object_delete(survival.vehicles[i]);
+				break;
+			}
+		}
+		/* (none: the oldest forgotten, left where it is) */
+		for (i = MIN(i, survival.vehicle_count - 1); i + 1 < survival.vehicle_count; i++)
+			survival.vehicles[i] = survival.vehicles[i + 1];
+		survival.vehicle_count--;
+	}
+	survival.vehicles[survival.vehicle_count++] = vehicle_index;
+}
+
+/* the Elites of the wave without a vehicle, put into some the level has: on
+odd waves from the third, one (two from the seventh), the kind picked from
+those the wave has reached */
+static void survival_spawn_vehicles(
+	void)
+{
+	struct survival_arena_definition const *arena = &survival_arenas[survival.arena];
+	long actor_indices[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+	short actor_types[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+	short living[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+	long kinds[NUMBEROF(survival_vehicles)];
+	short kind_count = 0, count = 0, wanted, made = 0;
+	unsigned long used_kinds = 0;
+	short i;
+
+	if (arena->maximum_height < SURVIVAL_VEHICLE_ARENA_HEIGHT || survival.wave < 3 || !(survival.wave & 1))
+		return;
+	for (i = 0; i < NUMBEROF(survival_vehicles); i++)
+	{
+		kinds[i] = survival.wave >= survival_vehicles[i].first_wave ?
+			tag_loaded('vehi', survival_vehicles[i].tag_name) : NONE;
+		kind_count += kinds[i] != NONE;
+	}
+	if (!kind_count)
+		return;
+	wanted = survival.wave >= 7 ? 2 : 1;
+	for (i = 0; i < survival.encounter_count && count < MAXIMUM_SURVIVAL_TRACKED_ACTORS; i++)
+	{
+		count += encounter_survival_actors(survival.encounters[i], actor_indices + count, actor_types + count,
+			living + count, (short)(MAXIMUM_SURVIVAL_TRACKED_ACTORS - count));
+	}
+	for (i = 0; i < count && made < wanted; i++)
+	{
+		struct actor_datum *actor;
+		struct unit_datum *unit;
+		struct unit_definition *definition;
+		struct object_placement_data data;
+		real_point3d place;
+		real_vector3d forward;
+		long vehicle_index;
+		short pick, kind, seat;
+
+		if (actor_types[i] != _actor_elite || living[i] <= 0)
+			continue;
+		actor = actor_get(actor_indices[i]);
+		unit = actor->meta.unit_index != NONE ? unit_try_and_get(actor->meta.unit_index) : NULL;
+		if (!unit || unit->object.parent_object_index != NONE)
+			continue;
+		/* (a kind the level has, the newest reached the likelier) */
+		pick = seed_random_range(&survival.seed, 0, kind_count);
+		for (kind = (short)NUMBEROF(survival_vehicles) - 1; kind >= 0; kind--)
+		{
+			if (kinds[kind] != NONE && pick-- == 0)
+				break;
+		}
+		/* (a second of another kind, if the level has another; never two of
+		a kind) */
+		if (kind >= 0 && TEST_FLAG(used_kinds, kind))
+		{
+			short other;
+
+			for (other = 0; other < NUMBEROF(survival_vehicles); other++)
+			{
+				if (kinds[other] != NONE && !TEST_FLAG(used_kinds, other))
+					break;
+			}
+			if (other == NUMBEROF(survival_vehicles))
+				break;
+			kind = other;
+		}
+		if (kind < 0)
+			continue;
+		if (!survival_vehicle_place(unit, survival_vehicles[kind].length, survival_vehicles[kind].width, &place, &forward))
+		{
+			platform_log("survival: no room for a %s by an Elite at %.1f %.1f %.1f", survival_vehicles[kind].name,
+				unit->object.position.x, unit->object.position.y, unit->object.position.z);
+			continue;
+		}
+		/* (not on top of a player) */
+		{
+			long units[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS];
+			short unit_count = survival_player_units(units), player;
+			boolean near = FALSE;
+
+			for (player = 0; player < unit_count && !near; player++)
+			{
+				near = survival_distance_squared(&place, &unit_get(units[player])->object.position) <
+					SURVIVAL_VEHICLE_PLAYER_DISTANCE * SURVIVAL_VEHICLE_PLAYER_DISTANCE;
+			}
+			if (near)
+				continue;
+		}
+		object_placement_data_new(&data, kinds[kind], NONE);
+		data.position = place;
+		data.forward = forward;
+		data.up.i = 0.0f;
+		data.up.j = 0.0f;
+		data.up.k = 1.0f;
+		vehicle_index = object_new(&data);
+		if (vehicle_index == NONE)
+			continue;
+		definition = unit_definition_get(unit_get(vehicle_index)->definition_index);
+		for (seat = 0; seat < definition->unit.seats.count; seat++)
+		{
+			if (unit_seat_is_driver(vehicle_index, seat))
+				break;
+		}
+		if (seat >= definition->unit.seats.count || !unit_enter_seat(actor->meta.unit_index, vehicle_index, seat))
+		{
+			platform_log("survival: an Elite could not drive a %s", survival_vehicles[kind].name);
+			object_delete(vehicle_index);
+			continue;
+		}
+		made++;
+		SET_FLAG(used_kinds, kind, TRUE);
+		survival_vehicle_keep(vehicle_index);
+		survival_message("A %s IS COMING", survival_vehicles[kind].name);
+		platform_log("survival: wave %d: a %s at %.1f %.1f %.1f", survival.wave, survival_vehicles[kind].name,
+			place.x, place.y, place.z);
+	}
+}
+
 static void survival_spawn_wave(
 	void)
 {
@@ -806,6 +995,7 @@ static void survival_spawn_wave(
 		survival.wave_placed += placed;
 		budget -= group;
 	}
+	survival_spawn_vehicles();
 	survival.wave_start_living = survival.wave_living = survival_living_count();
 	survival_score();
 	survival_reveal_player();
@@ -982,7 +1172,8 @@ static void survival_begin(
 		platform_log("survival:   %s/%s: actor type %d, tier %d, %.0f away", encounter->name,
 			squad_definition->name, squad->actor_type, squad->tier, squad->distance);
 	}
-	survival.wave = 1;
+	/* (debug.survival_wave: a test's) */
+	survival.wave = (short)PIN(config_integer("debug.survival_wave"), 1, 99);
 	survival.kills = 0;
 	/* (debug.survival_points: a test's) */
 	survival.points = config_integer("debug.survival_points");
@@ -1291,7 +1482,8 @@ static boolean survival_vehicle_place(
 {
 	short side;
 
-	for (side = 0; side < 4; side++)
+	/* (each side near, then each a little farther) */
+	for (side = 0; side < 8; side++)
 	{
 		real_vector3d direction = unit->object.forward;
 		real_vector3d across;
@@ -1309,7 +1501,7 @@ static boolean survival_vehicle_place(
 			direction.j = 0.0f;
 		}
 		/* (a quarter turn each time) */
-		for (corner = 0; corner < side; corner++)
+		for (corner = 0; corner < (side & 3); corner++)
 		{
 			turned_i = -direction.j;
 			direction.j = direction.i;
@@ -1320,8 +1512,8 @@ static boolean survival_vehicle_place(
 		across.k = 0.0f;
 		eye.z += 0.5f;
 		center = eye;
-		center.x += direction.i * (length * 0.5f + 1.2f);
-		center.y += direction.j * (length * 0.5f + 1.2f);
+		center.x += direction.i * (length * 0.5f + (side < 4 ? 1.2f : 3.5f));
+		center.y += direction.j * (length * 0.5f + (side < 4 ? 1.2f : 3.5f));
 		if (survival_blocked(&eye, &center))
 			continue;
 		/* (the ground under it, and room above) */
@@ -1335,15 +1527,18 @@ static boolean survival_vehicle_place(
 		above.z += 1.5f;
 		if (survival_blocked(&center, &above))
 			continue;
-		/* (its corners clear of walls) */
+		/* (its corners clear of walls, at its body's height: not the ground's
+		slope under them) */
 		for (corner = 0; corner < 4 && room; corner++)
 		{
-			real_point3d point = center;
+			real_point3d body = center, point;
 			real along = (corner & 1 ? 0.5f : -0.5f) * length, beside = (corner & 2 ? 0.5f : -0.5f) * width;
 
+			body.z += 0.6f;
+			point = body;
 			point.x += direction.i * along + across.i * beside;
 			point.y += direction.j * along + across.j * beside;
-			room = !survival_blocked(&center, &point);
+			room = !survival_blocked(&body, &point);
 		}
 		if (!room)
 			continue;

@@ -202,6 +202,13 @@ active camouflage, two more grenades of a kind, a full load of ammunition,
 the level's own weapons (from the pistol for 100 to the rocket launcher
 for 600), dropped at the player's feet to be picked up, and on a level
 with Warthogs one for 1000, put down in front where there is room for it.
+From the third wave, every other wave brings the Covenant's vehicles on
+the open arenas (The Pillar of Autumn's crash site, Truth and
+Reconciliation's canyon, the beach, the canyon before the bridge), each
+driven by one of the wave's Elites: a Ghost from the third wave, a Banshee
+from the fifth, a Wraith from the seventh, whichever the level has, two of
+different kinds from the seventh. Emptied, they are the players' to take;
+the oldest empty one out of sight goes once four are about.
 The bodies and dropped weapons of the waves before are cleaned up as the
 game goes on, a few at a time and only those out of sight, the newest
 dozen kept. There is

@@ -393,6 +393,8 @@ static const struct config_setting config_settings[] =
 		"Kill each survival wave this many seconds after it comes (tests); 0 never." },
 	{ "debug.survival_points", _config_integer, "0", "HALO_SURVIVAL_POINTS", _environment_value, _platform_all,
 		"The points a survival game starts with, for the shop's tests; 0 none." },
+	{ "debug.survival_wave", _config_integer, "0", "HALO_SURVIVAL_WAVE", _environment_value, _platform_all,
+		"The wave a survival game starts at, for tests of later waves; 0 the first." },
 	{ "debug.exit_after", _config_real, "0.0", "HALO_EXIT_AFTER", _environment_value, _platform_all,
 		"Quit this many seconds after the window opens; 0 never." },
 	{ "debug.hidden_window", _config_boolean, "false", "HALO_HIDDEN_WINDOW", _environment_set_is_true, _platform_desktop,
