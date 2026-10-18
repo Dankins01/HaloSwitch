@@ -380,6 +380,7 @@ symbols in this file:
 #include "networking/network_game_manager.h"
 #include "networking/network_server_manager.h" /* port: a co-op game's level won */
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "survival.h" /* port: port/linux/game/survival.c */
 #include "camera/director.h"
 #include "camera/observer.h"
 #include "cutscene/cinematics.h"
@@ -1461,7 +1462,9 @@ static void main_new_map(
 	main_globals.load_core = main_globals.load_core_at_startup;
 	main_globals.load_core_at_startup = FALSE;
 
-	if (main_globals.allow_persistent_storage)
+	/* port: a survival game starts fresh, whatever saved game the level has
+	(port/linux/game/survival.c) */
+	if (main_globals.allow_persistent_storage && !survival_active())
 		game_state_try_and_load_from_persistent_storage();
 	ui_widgets_disable_pause_game(30);
 
@@ -2047,6 +2050,10 @@ static void main_lost_map_private(
 	{
 		main_globals.lost_map = FALSE;
 		main_globals.loss_timer = 0;
+		/* port: a survival game ends with the player's death, back to the
+		main menu (port/linux/game/survival.c) */
+		if (survival_player_lost())
+			return;
 		/* port: in network co-op, everyone dying respawns the players where
 		they were at the last checkpoint, without a revert. A mission the
 		scripts failed (game_lost, with players still alive: d40's timer,

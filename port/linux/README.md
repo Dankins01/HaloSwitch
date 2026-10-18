@@ -170,6 +170,27 @@ New Game's levels are those either profile has reached. Either player's
 controller chooses the level and the difficulty. A co-op game does
 not continue a saved game of one player.
 
+New Game's chooser, above its list, has SURVIVAL after SINGLEPLAYER and
+MULTIPLAYER: a campaign level's ground held against waves of its enemies
+(`port/linux/game/survival.c`). The arena so far is the beach of The Silent
+Cartographer, open whatever the profile has reached. None of the level's
+scripts run (no cutscenes, no mission) and none of its own enemies are
+placed. After a few seconds the first wave comes: the level's own Covenant
+from near the beach, placed around it and sent at the player. When a wave is
+killed (or has lasted two and a half minutes, or its last three have held
+out for a minute), the player is healed, the weapons carried are filled
+with ammunition and the grenades topped up to two, and 12 seconds later a
+larger wave comes: Grunts first, Elites from the second wave, more of them
+as the waves go on. The difficulty chosen sets the enemies' strength as in
+the campaign, and Heroic and Legendary add 2 and 4 enemies to each wave.
+There is one life: dying ends the game, with the waves survived and the
+enemies killed on the HUD, and goes back to the main menu. In split screen
+co-op, a player who dies comes back while the other lives. A survival game
+is never saved, so it never takes the place of the campaign's saved game;
+the pause menu's restart starts it again from the first wave. Only a game
+on one machine plays survival: the Map screen of a network game has no
+SURVIVAL.
+
 Network games have split screen too: up to 4 players on each computer. In
 the game lobby, another controller presses START to join, and the new
 player's profile is chosen on the ADD PLAYER screen that opens (with any

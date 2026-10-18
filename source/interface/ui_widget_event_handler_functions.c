@@ -924,6 +924,7 @@ symbols in this file:
 #include "networking/network_messages.h"
 #include "networking/network_server_manager.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "survival.h" /* port: port/linux/game/survival.c */
 #include "saved games/game_state.h"
 #include "saved games/player_profile.h"
 #include "interface/ui_widget_definitions.h"
@@ -2027,9 +2028,10 @@ static boolean pause_game_quit_to_main_menu(
 			network_game_client_local_player_quit(controller_index);
 		return TRUE;
 	}
-	/* port: a multiplayer map played alone (New Game's MULTIPLAYER maps) is
-	not saved, so it never takes the place of the campaign's saved game */
-	if (main_get_current_solo_level() != NONE)
+	/* port: a multiplayer map played alone (New Game's MULTIPLAYER maps), or
+	a survival game (port/linux/game/survival.c), is not saved, so it never
+	takes the place of the campaign's saved game */
+	if (main_get_current_solo_level() != NONE && !survival_active())
 		game_state_save_to_persistent_storage();
 	main_goto_main_menu();
 	return TRUE;

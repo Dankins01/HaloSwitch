@@ -152,7 +152,7 @@ static void write_to_debug_file(
 	prefix[0] = 0;
 	if (date)
 	{
-		long timeptr;
+		time_t timeptr;
 		struct tm *_time;
 
 		time(&timeptr);

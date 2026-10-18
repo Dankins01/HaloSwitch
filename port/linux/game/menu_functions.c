@@ -76,6 +76,7 @@ their handlers open opens.
 #include "text/unicode.h"
 
 #include "halo_menus.h"
+#include "survival.h"
 /* (internet play's server browser: the platform layer's) */
 #include "../src/p2p.h"
 
@@ -751,6 +752,8 @@ static void campaign_levels_read(struct player_profile const *profile)
 main_new_map, if its difficulty is this one) */
 static void campaign_start(char const *map_name, short difficulty, short controller)
 {
+	/* (a campaign game: none of survival's, unless difficulty_start asks) */
+	survival_request(NONE);
 	if (player_spawn_count < 2)
 		player_ui_set_single_player_local_player_controller(0, controller);
 	main_set_map_name(map_name);
@@ -860,14 +863,15 @@ static boolean campaign_continue(short controller)
 }
 
 /* ---- the map lists (New Game's and the Map screen's): their first row's
-chooser of SINGLEPLAYER (the campaign's levels) or MULTIPLAYER maps
-(port_settings.MAP_KIND_CHOOSER), then the kind's rows, scrolling as
-list_scroll scrolls */
+chooser of SINGLEPLAYER (the campaign's levels), MULTIPLAYER maps or (New
+Game's only) SURVIVAL's arenas (port_settings.MAP_KIND_CHOOSER), then the
+kind's rows, scrolling as list_scroll scrolls */
 
 enum
 {
 	MAP_KIND_SINGLEPLAYER,
 	MAP_KIND_MULTIPLAYER,
+	MAP_KIND_SURVIVAL,
 	NUMBER_OF_MAP_KINDS
 };
 
@@ -954,6 +958,21 @@ static void multiplayer_map_text(short map, wchar_t *text)
 	string_get("pc\\main_menu\\mp_map_list", map, text);
 }
 
+static void survival_arena_text(short arena, wchar_t *text)
+{
+	ustrncpy(text, survival_arena_display_name(arena), ROW_TEXT_LENGTH - 1);
+	text[ROW_TEXT_LENGTH - 1] = 0;
+}
+
+/* the campaign level an arena is on (its picture, name and words for the
+description) */
+static short survival_arena_level(short arena)
+{
+	char const *map_name = survival_arena_map_name(arena);
+
+	return map_name ? main_get_solo_level_from_name(map_name) : NONE;
+}
+
 /* the description's map (each list's has both kinds' widgets): a campaign
 level's picture, name and words (level_description sets them), or a
 multiplayer map's, or (both NONE) neither */
@@ -985,7 +1004,8 @@ static void map_description_show(struct widget_instance *description, short leve
 
 /* New Game's list: SINGLEPLAYER's levels, the profile's reached, or
 MULTIPLAYER's maps, played alone to walk around (no game engine: a campaign
-game on the map) */
+game on the map), or SURVIVAL's arenas (port/linux/game/survival.c), each
+open whatever the profile has reached */
 static struct
 {
 	short kind;
@@ -993,7 +1013,9 @@ static struct
 	/* the multiplayer maps (ui_widget_port_multiplayer_maps) */
 	char const *const *map_names;
 	short map_count;
-} level_list;
+	/* the arena chosen, for the difficulty menu (NONE: a campaign level) */
+	short survival_arena;
+} level_list = { MAP_KIND_SINGLEPLAYER, 0, 0, NULL, 0, NONE };
 
 /* "initialize sp level list solo" starts on the level last played */
 static boolean level_list_initialize(struct widget_instance *list, short controller)
@@ -1012,6 +1034,7 @@ static boolean level_list_initialize(struct widget_instance *list, short control
 	campaign.shown_level = level;
 	level_list.map_count = ui_widget_port_multiplayer_maps(&level_list.map_names, &last_used);
 	level_list.kind = MAP_KIND_SINGLEPLAYER;
+	level_list.survival_arena = NONE;
 	level_list.chosen = level;
 	level_list.first = map_kind_first(level, NUMBER_OF_SINGLE_PLAYER_LEVELS);
 	map_kind_set(list, level_list.kind);
@@ -1035,14 +1058,25 @@ static void level_list_update(struct widget_instance *list)
 		level_list.kind = kind;
 		level_list.first = level_list.chosen = 0;
 	}
-	count = kind == MAP_KIND_SINGLEPLAYER ? NUMBER_OF_SINGLE_PLAYER_LEVELS : level_list.map_count;
+	count = kind == MAP_KIND_SINGLEPLAYER ? NUMBER_OF_SINGLE_PLAYER_LEVELS :
+		kind == MAP_KIND_SURVIVAL ? survival_arena_count() : level_list.map_count;
 	entry = map_kind_rows_update(list, &level_list.first, count,
-		kind == MAP_KIND_SINGLEPLAYER ? level_row_text : multiplayer_map_text);
+		kind == MAP_KIND_SINGLEPLAYER ? level_row_text : kind == MAP_KIND_SURVIVAL ? survival_arena_text :
+		multiplayer_map_text);
 	if (entry != NONE)
 		level_list.chosen = entry;
 	if (kind == MAP_KIND_MULTIPLAYER)
 	{
 		map_description_show(description, NONE, level_list.chosen < count ? level_list.chosen : NONE);
+		profile_name_show(description);
+		return;
+	}
+	if (kind == MAP_KIND_SURVIVAL)
+	{
+		level = survival_arena_level(level_list.chosen);
+		map_description_show(description, level, NONE);
+		if (level != NONE)
+			level_description(description, "replay_level", level, FALSE, NULL, NONE);
 		profile_name_show(description);
 		return;
 	}
@@ -1062,6 +1096,19 @@ static boolean level_choose(short controller)
 {
 	short level = campaign.shown_level;
 
+	level_list.survival_arena = NONE;
+	if (level_list.kind == MAP_KIND_SURVIVAL)
+	{
+		short arena = level_list.chosen;
+
+		if (arena < 0 || arena >= survival_arena_count() || survival_arena_level(arena) == NONE)
+			return campaign_fail();
+		/* (the difficulty menu next, as for a campaign level) */
+		level_list.survival_arena = arena;
+		main_set_map_name(survival_arena_map_name(arena));
+		main_defer_map_map_change();
+		return TRUE;
+	}
 	if (level_list.kind == MAP_KIND_MULTIPLAYER)
 	{
 		struct player_profile profile;
@@ -1095,6 +1142,13 @@ static boolean difficulty_start(short difficulty, short controller)
 	if (!map_name || main_get_solo_level_from_name(map_name) == NONE)
 		map_name = main_get_solo_level_name(0);
 	campaign_start(map_name, PIN(difficulty, 0, 3), controller);
+	/* (New Game's SURVIVAL: the level played as the arena's survival game) */
+	if (level_list.survival_arena != NONE && survival_arena_map_name(level_list.survival_arena) &&
+		!_stricmp(map_name, survival_arena_map_name(level_list.survival_arena)))
+	{
+		survival_request(level_list.survival_arena);
+	}
+	level_list.survival_arena = NONE;
 	return TRUE;
 }
 
@@ -2372,6 +2426,13 @@ static void map_list_update(struct widget_instance *list)
 	struct widget_instance *description = list->parameters.list.extended_description;
 	short kind = map_kind_shown(list, map_list.hosting ? NONE : MAP_KIND_MULTIPLAYER), count, entry;
 
+	/* (survival is a local game's: the chooser steps over it, on to the
+	kind other than the one it came from) */
+	if (kind == MAP_KIND_SURVIVAL)
+	{
+		kind = map_list.kind == MAP_KIND_MULTIPLAYER ? MAP_KIND_SINGLEPLAYER : MAP_KIND_MULTIPLAYER;
+		map_kind_set(list, kind);
+	}
 	if (kind != map_list.kind)
 	{
 		map_list.kind = kind;

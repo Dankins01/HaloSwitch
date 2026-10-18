@@ -181,6 +181,7 @@ struct game_options;
 #include "units/units.h"
 #include "units/vehicles.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "survival.h" /* port: port/linux/game/survival.c */
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
@@ -354,6 +355,7 @@ void game_tick(
 	decisions that belong to the host. */
 	if (!(network_game_distributed_client() && network_coop_active()))
 		hs_update();
+	survival_update();
 	recorded_animations_update();
 	objects_update();
 	players_update_after_game();
@@ -611,7 +613,12 @@ void game_initialize_for_new_map(
 		0x1D2,
 		!game_globals->active);
 
+	boolean place_actors;
+
 	set_random_seed(game_globals->options.random_seed);
+	/* port: a survival game (port/linux/game/survival.c) runs none of the
+	level's scripts and places none of its actors */
+	place_actors = survival_initialize_for_new_map(game_globals->options.map_name);
 	game_engine_dispose();
 	game_engine_initialize(&game_variant_global);
 	real_math_reset_precision();
@@ -661,7 +668,7 @@ void game_initialize_for_new_map(
 
 	game_globals->active = TRUE;
 	objects_place();
-	if (!game_in_editor())
+	if (!game_in_editor() && place_actors)
 		ai_place();
 	/* (the map's objects, placed as on the host: a distributed client's own
 	from now on go elsewhere, port/linux/game/network_objects.c) */
@@ -865,6 +872,7 @@ void game_precache_new_map(
 void game_dispose_from_old_map(
 	void)
 {
+	survival_dispose_from_old_map();
 	rasterizer_dispose_from_old_map();
 	game_state_dispose_from_old_map();
 	cheats_dispose_from_old_map();

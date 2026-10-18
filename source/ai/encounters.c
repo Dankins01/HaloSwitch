@@ -4121,3 +4121,86 @@ static void encounters_test_activation(
 
 	return;
 }
+
+/* ---------- port: survival mode's waves (port/linux/game/survival.c) */
+
+/* the datum of the scenario's encounter at `absolute_index`, NONE if none */
+long encounter_survival_index(
+	short absolute_index)
+{
+	struct encounter_iterator iterator;
+
+	if (!ai_globals->ai_initialized_for_map)
+		return NONE;
+	encounter_iterator_new(&iterator, FALSE);
+	while (encounter_iterator_next(&iterator) != NULL)
+	{
+		if (DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.index) == absolute_index)
+			return iterator.index;
+	}
+	return NONE;
+}
+
+/* the kind of actor the squad places (_actor_elite and so on) */
+short encounter_survival_squad_actor_type(
+	short absolute_index,
+	short squad_index)
+{
+	struct encounter_definition *encounter_definition = TAG_BLOCK_GET_ELEMENT(
+		&global_scenario_get()->ai_encounters, absolute_index, struct encounter_definition);
+
+	return squad_get_actor_type(TAG_BLOCK_GET_ELEMENT(&encounter_definition->squads, squad_index,
+		struct squad_definition));
+}
+
+/* the encounter's living enemies (each swarm's units) */
+short encounter_survival_living_count(
+	long encounter_index)
+{
+	struct encounter_actor_iterator iterator;
+	struct actor_datum *actor;
+	short count = 0;
+
+	if (!ai_globals->ai_initialized_for_map || !encounter_try_and_get(encounter_index))
+		return 0;
+	encounter_actor_iterator_new(&iterator, encounter_index);
+	while ((actor = encounter_actor_iterator_next(&iterator)) != NULL)
+	{
+		if (actor->meta.unit_index != NONE)
+		{
+			struct unit_datum *unit = unit_try_and_get(actor->meta.unit_index);
+
+			if (unit && !TEST_FLAG(unit->object.damage_flags, _object_dead_bit))
+				count++;
+		}
+		else
+		{
+			count += actor->meta.swarm_unit_count;
+		}
+	}
+	return count;
+}
+
+/* places `count` of the squad's actors, spread on free ground around its
+starting locations (the extra enemies' places: coop_enemies.c), `first`
+counting on from the squad's last ones; the number placed */
+short encounter_survival_place(
+	long encounter_index,
+	short squad_index,
+	short count,
+	short first)
+{
+	short placed = 0;
+	short i;
+
+	if (!ai_globals->ai_initialized_for_map || !encounter_try_and_get(encounter_index))
+		return 0;
+	for (i = 0; i < count; ++i)
+	{
+		if (encounter_place_actor(encounter_index, squad_index, 0, FALSE, (short)(first + i + 1)))
+			placed++;
+	}
+	encounter_update_status(encounter_index);
+	encounters_test_activation();
+	return placed;
+}

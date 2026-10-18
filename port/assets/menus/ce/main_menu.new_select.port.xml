@@ -10,5 +10,6 @@
 	<strings name="main_menu/new_select/var_map_kinds">
 		<string text="SINGLEPLAYER"/>
 		<string text="MULTIPLAYER"/>
+		<string text="SURVIVAL"/>
 	</strings>
 </menus>

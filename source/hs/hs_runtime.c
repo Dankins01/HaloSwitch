@@ -283,6 +283,7 @@ symbols in this file:
 #include "cseries/errors.h"
 #include "main/console.h"
 #include "game/game.h"
+#include "survival.h" /* port: port/linux/game/survival.c */
 
 /* ---------- constants */
 
@@ -837,8 +838,11 @@ void hs_runtime_initialize_for_new_map(
 				script_index,
 				struct hs_script);
 
+			/* port: a survival game runs none of the level's scripts
+			(port/linux/game/survival.c) */
 			if (script->script_type!=_hs_script_static &&
-				script->script_type!=_hs_script_stub)
+				script->script_type!=_hs_script_stub &&
+				!survival_active())
 			{
 				if (hs_thread_new(_hs_thread_type_script, script_index)==NONE)
 					error(_error_immediate, "ran out of script threads.");
