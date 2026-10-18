@@ -215,6 +215,8 @@ static struct survival_good const survival_goods[] =
 	{ "SNIPER RIFLE", 450, _survival_good_weapon, 'weap', "weapons\\sniper rifle\\sniper rifle" },
 	{ "FUEL ROD GUN", 500, _survival_good_weapon, 'weap', "weapons\\fuel rod gun\\fuel rod" },
 	{ "ROCKET LAUNCHER", 600, _survival_good_weapon, 'weap', "weapons\\rocket launcher\\rocket launcher" },
+	{ "H2 ROCKET LAUNCHER", 650, _survival_good_weapon, 'weap', "weapons\\h2 rocket launcher\\rocket launcher" },
+	{ "ENERGY SWORD", 500, _survival_good_weapon, 'weap', "weapons\\h2 energy sword\\energy sword" },
 	{ "WARTHOG", 1000, _survival_good_vehicle, 'vehi', "vehicles\\warthog\\warthog" },
 };
 

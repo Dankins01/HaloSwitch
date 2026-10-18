@@ -16,8 +16,15 @@ else (its animations, sounds, HUD and effects) is the donor's. A model is a
 copy of the donor's (its nodes and markers, which the animations move) with
 the pack's geometry: each part a texture of the pack's (a bitmap group of
 one DXT texture), drawn with a copy of one of the donor's model shaders, its
-vertices bound to the donor's nodes by name and placed in the donor's
-space (the donor's gun node where Halo 2's is).
+vertices bound to the donor's nodes by name. In the first person they are
+placed as Halo 2 has them about its root, the donor's gun node at rest in
+its animations; in the third person as Halo 2 has them about the model's
+origin, which a unit's hand holds.
+
+The energy sword is built on the plasma pistol (held as it is): its
+triggers strike at arm's length, unseen, with the Elites' sword's melee
+damage, which its melee does too, and its blade glows with the Elites'
+sword's shader, where the map has them.
 
 A weapon whose donor the map has not got is left out, and the shop
 (survival.c) sells only those the map has. All of it is let go in
@@ -29,7 +36,10 @@ scenario_tags_unload, after the menus' tags.
 #include "game/game_globals.h"
 #include "items/projectile_definitions.h"
 #include "items/weapon_definitions.h"
+#include "math/real_math.h"
+#include "models/model_animation_definitions.h"
 #include "models/model_definitions.h"
+#include "models/models.h"
 #include "objects/damage_effect_definitions.h"
 #include "rasterizer/rasterizer_geometry.h"
 #include "rasterizer/rasterizer_model_types.h"
@@ -67,10 +77,13 @@ void weapon_tags_unloaded(void);
 
 #define PACK_NAME "h2weapons.pak"
 #define PACK_SIGNATURE "H2WP"
-#define PACK_VERSION 2
+#define PACK_VERSION 4
 #define PACK_TAG_NAME 64
 #define PACK_DISPLAY_NAME 32
 #define PACK_NODE_NAME 32
+/* a node's name and its Halo 2 bind pose (a matrix's forward, left, up and
+position) */
+#define PACK_NODE_SIZE (PACK_NODE_NAME + 12 * 4)
 #define PACK_MAXIMUM_SIZE (64L * 1024 * 1024)
 #define SHADER_PREFIX "h2weapons\\shaders\\"
 #define TEXTURE_PREFIX "h2weapons\\"
@@ -89,8 +102,9 @@ enum
 	MAXIMUM_PART_INDICES = 1L << 20,
 	NUMBER_OF_DETAIL_LEVELS = 5,
 	/* the tags a weapon adds besides its shaders and textures: itself, its
-	two models, a projectile and its damage effect */
-	TAGS_PER_WEAPON = 5,
+	two models, a projectile and its damage effect for each of two
+	triggers, and a melee's */
+	TAGS_PER_WEAPON = 8,
 	/* a compressed model vertex's node index (a node's matrix's first of
 	three constants), NONE's for a vertex of one node */
 	COMPRESSED_NODE_SCALE = 3,
@@ -101,7 +115,26 @@ enum
 enum
 {
 	_pack_part_alpha_tested_bit = 0,
+	/* (a sword's blade: drawn with the Elites' sword's glow, if the map has
+	it) */
+	_pack_part_glow_bit,
 };
+
+/* a pack weapon's kind */
+enum
+{
+	_pack_weapon_gun = 0,
+	/* its trigger a strike at arm's length, its melee the Elites' sword's */
+	_pack_weapon_sword,
+};
+
+/* the Elites' sword's, which the sword uses where the map has them */
+#define SWORD_GLOW_SHADER "weapons\\energy sword\\shaders\\es blade top"
+#define SWORD_MELEE_DAMAGE "weapons\\energy sword\\melee"
+#define SHADER_TRANSPARENT_CHICAGO_TAG 'schi'
+/* the reach of the sword's strike, and its speed (world units) */
+#define SWORD_STRIKE_RANGE 2.2f
+#define SWORD_STRIKE_SPEED 60.0f
 
 enum
 {
@@ -268,7 +301,7 @@ struct pack_geometry
 struct pack_model
 {
 	long node_count;
-	char const *node_names;
+	byte const *nodes;
 	byte levels[NUMBER_OF_DETAIL_LEVELS];
 	long geometry_count;
 	struct pack_geometry geometries[MAXIMUM_PACK_GEOMETRIES];
@@ -287,6 +320,8 @@ struct pack_weapon
 	real error;
 	real zoom;
 	real damage;
+	short kind;
+	real_vector3d first_person_offset;
 	struct pack_model first_person;
 	struct pack_model third_person;
 };
@@ -424,7 +459,7 @@ static void pack_model_read(struct pack_reader *reader, struct pack_model *model
 	long geometry_index, level;
 
 	model->node_count = (long)pack_unsigned(reader, 2);
-	model->node_names = pack_take(reader, model->node_count * PACK_NODE_NAME);
+	model->nodes = pack_take(reader, model->node_count * PACK_NODE_SIZE);
 	for (level = 0; level < NUMBER_OF_DETAIL_LEVELS; level++)
 		model->levels[level] = (byte)pack_unsigned(reader, 1);
 	pack_take(reader, 1);
@@ -532,6 +567,11 @@ static boolean pack_read(byte const *data, long size, struct pack_weapon **weapo
 		weapon->error = pack_real(&reader);
 		weapon->zoom = pack_real(&reader);
 		weapon->damage = pack_real(&reader);
+		weapon->kind = (short)pack_unsigned(&reader, 2);
+		pack_take(&reader, 2);
+		weapon->first_person_offset.i = pack_real(&reader);
+		weapon->first_person_offset.j = pack_real(&reader);
+		weapon->first_person_offset.k = pack_real(&reader);
 		pack_model_read(&reader, &weapon->first_person);
 		pack_model_read(&reader, &weapon->third_person);
 	}
@@ -755,6 +795,14 @@ static long shader_build(long texture, unsigned short flags, long source_index)
 	long index, texture_tag;
 	char const *short_name;
 
+	/* (a blade: the Elites' sword's own glow) */
+	if (TEST_FLAG(flags, _pack_part_glow_bit))
+	{
+		long glow_index = tag_loaded(SHADER_TRANSPARENT_CHICAGO_TAG, SWORD_GLOW_SHADER);
+
+		if (glow_index != NONE)
+			return glow_index;
+	}
 	for (index = 0; index < build.shader_count; index++)
 	{
 		if (build.shaders[index].texture == texture && build.shaders[index].flags == flags &&
@@ -815,7 +863,7 @@ static long shader_build(long texture, unsigned short flags, long source_index)
 /* ---------- models */
 
 static boolean part_build(struct model_geometry_part *part, struct pack_part const *source, short const *node_map,
-	long node_count, real_point3d const *root)
+	long node_count, real_matrix4x3 const *transforms)
 {
 	long vertex_size = (long)sizeof(struct model_vertex_compressed);
 	struct model_vertex_compressed *vertices = allocate(source->vertex_count * vertex_size);
@@ -837,12 +885,20 @@ static boolean part_build(struct model_geometry_part *part, struct pack_part con
 	for (index = 0; index < source->vertex_count; index++)
 	{
 		struct model_vertex_compressed *vertex = &vertices[index];
-		long node = vertex->nodes[0] < node_count ? node_map[vertex->nodes[0]] : 0;
+		long pack_node = vertex->nodes[0] < node_count ? vertex->nodes[0] : 0;
+		long node = node_map[pack_node];
+		real_matrix4x3 const *transform = &transforms[pack_node];
+		real_point3d position = vertex->position;
+		real_vector3d vector, moved;
 
-		/* (in the donor's space: its gun node where Halo 2's is) */
-		vertex->position.x += root->x;
-		vertex->position.y += root->y;
-		vertex->position.z += root->z;
+		/* (from its Halo 2 node's bind pose to its donor node's) */
+		matrix4x3_transform_point(transform, &position, &vertex->position);
+		vector = uncompress_int32_to_real_vector3d(vertex->normal);
+		vertex->normal = compress_real_vector3d_to_int32_clamp(matrix4x3_transform_vector(transform, &vector, &moved));
+		vector = uncompress_int32_to_real_vector3d(vertex->binormal);
+		vertex->binormal = compress_real_vector3d_to_int32_clamp(matrix4x3_transform_vector(transform, &vector, &moved));
+		vector = uncompress_int32_to_real_vector3d(vertex->tangent);
+		vertex->tangent = compress_real_vector3d_to_int32_clamp(matrix4x3_transform_vector(transform, &vector, &moved));
 		vertex->nodes[0] = (byte)(node * COMPRESSED_NODE_SCALE);
 		vertex->nodes[1] = COMPRESSED_NO_NODE;
 		vertex->node_weight = SHORT_MAX;
@@ -875,8 +931,73 @@ static boolean part_build(struct model_geometry_part *part, struct pack_part con
 	return TRUE;
 }
 
-/* a copy of the donor's model with the pack's geometry */
-static long model_build(struct pack_model const *source, long donor_index, char const *name)
+/* the first-person animations' rest (the idle's first frame): each node's
+matrix, by name; FALSE if it has none */
+struct weapon_animation_graph_node
+{
+	char name[TAG_STRING_LENGTH+1];
+	short next_sibling_node_index;
+	short first_child_node_index;
+	short parent_node_index;
+	word pad;
+	unsigned long flags;
+	real_vector3d base_vector;
+	real range;
+	long pad1;
+};
+
+static boolean rest_pose(long animations_index, real_matrix4x3 *matrices, long *node_count)
+{
+	struct animation_graph const *graph;
+	struct real_orientation orientations[MAXIMUM_NODES_PER_MODEL];
+	long index;
+
+	if (animations_index == NONE || tag_group_of(animations_index) != 'antr')
+		return FALSE;
+	graph = animation_graph_definition_get(animations_index);
+	if (graph->nodes.count < 1 || graph->nodes.count > MAXIMUM_NODES_PER_MODEL)
+		return FALSE;
+	for (index = 0; index < graph->animations.count; index++)
+	{
+		struct animation const *animation = TAG_BLOCK_GET_ELEMENT(&graph->animations, index, struct animation);
+
+		if (!strcmp(animation->name, "first-person idle") && animation->node_count == graph->nodes.count &&
+			animation->frame_count > 0)
+		{
+			memset(orientations, 0, sizeof(orientations));
+			animation_get_node_orientations(NULL, animation, 0, orientations);
+			animation_graph_node_matrices_from_orientations(animations_index, matrices, orientations, global_origin3d,
+				global_forward3d, global_up3d);
+			*node_count = graph->nodes.count;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+static long rest_pose_node(long animations_index, long node_count, char const *name)
+{
+	struct animation_graph const *graph = animation_graph_definition_get(animations_index);
+	long index;
+
+	for (index = 0; index < node_count; index++)
+	{
+		struct weapon_animation_graph_node const *node = TAG_BLOCK_GET_ELEMENT(&graph->nodes, index,
+			struct weapon_animation_graph_node);
+
+		if (!strncmp(node->name, name, TAG_STRING_LENGTH))
+			return index;
+	}
+	return NONE;
+}
+
+/* a copy of the donor's model with the pack's geometry. Its vertices are
+placed as Halo 2 has them about its root (the donor's gun's place): in the
+first person as the animations' rest pose shows them, with each moving
+part bound where its node is then; else as the donor's bind pose shows
+them */
+static long model_build(struct pack_model const *source, long donor_index, long animations_index,
+	real_vector3d const *offset, char const *name)
 {
 	struct model const *donor = model_definition_get(donor_index);
 	struct model *model = allocate(sizeof(*model));
@@ -885,9 +1006,16 @@ static long model_build(struct pack_model const *source, long donor_index, char 
 	struct model_geometry *geometries = allocate(source->geometry_count * sizeof(*geometries));
 	struct model_shader_reference *shaders;
 	short node_map[MAXIMUM_NODES_PER_MODEL];
+	/* (the donor's nodes' bind poses, and what moves a vertex from each of
+	the pack's nodes' to its donor node's) */
+	real_matrix4x3 binds[MAXIMUM_NODES_PER_MODEL];
+	real_matrix4x3 transforms[MAXIMUM_NODES_PER_MODEL];
+	real_matrix4x3 pack_root_inverse;
+	real_matrix4x3 rest[MAXIMUM_NODES_PER_MODEL];
+	long rest_count = 0, rest_root = NONE;
+	boolean has_rest;
 	long shader_source_index = shader_source(donor);
 	long part_total = 0, geometry_index, index, level;
-	real_point3d root;
 
 	if (!model || !region || !permutation || !geometries || build.failed)
 		return NONE;
@@ -902,18 +1030,35 @@ static long model_build(struct pack_model const *source, long donor_index, char 
 	if (!shaders)
 		return NONE;
 	memcpy(model, donor, sizeof(*model));
-	/* (each of the pack's nodes the donor's of its name; else its root) */
+	/* (each of the pack's nodes the donor's of its name, its vertices where
+	that is; else the donor's root, as the pack's root is: the first) */
+	model_get_node_matrices(donor, binds, NULL, NULL, NULL);
+	has_rest = rest_pose(animations_index, rest, &rest_count);
+	if (has_rest)
 	{
 		struct model_node const *root_node = TAG_BLOCK_GET_ELEMENT(&donor->nodes, 0, struct model_node);
 
-		root = root_node->default_translation;
+		rest_root = rest_pose_node(animations_index, rest_count, root_node->name);
+		has_rest = rest_root != NONE;
 	}
 	for (index = 0; index < source->node_count; index++)
 	{
-		char const *node_name = source->node_names + index * PACK_NODE_NAME;
+		byte const *record = source->nodes + index * PACK_NODE_SIZE;
+		char const *node_name = (char const *)record;
+		real_matrix4x3 pack_bind, inverse;
+		real values[12];
 		long node_index;
 
-		node_map[index] = 0;
+		memcpy(values, record + PACK_NODE_NAME, sizeof(values));
+		pack_bind.scale = 1.0f;
+		pack_bind.forward.i = values[0]; pack_bind.forward.j = values[1]; pack_bind.forward.k = values[2];
+		pack_bind.left.i = values[3]; pack_bind.left.j = values[4]; pack_bind.left.k = values[5];
+		pack_bind.up.i = values[6]; pack_bind.up.j = values[7]; pack_bind.up.k = values[8];
+		pack_bind.position.x = values[9]; pack_bind.position.y = values[10]; pack_bind.position.z = values[11];
+		matrix4x3_inverse(&pack_bind, &inverse);
+		if (!index)
+			pack_root_inverse = inverse;
+		node_map[index] = NONE;
 		for (node_index = 0; node_index < donor->nodes.count; node_index++)
 		{
 			struct model_node const *node = TAG_BLOCK_GET_ELEMENT(&donor->nodes, node_index, struct model_node);
@@ -922,6 +1067,35 @@ static long model_build(struct pack_model const *source, long donor_index, char 
 			{
 				node_map[index] = (short)node_index;
 				break;
+			}
+		}
+		if (node_map[index] == NONE)
+			node_map[index] = 0;
+		/* (Halo 2's place about its root, then where the donor's node is
+		at rest: bind * rest^-1 * rest_root * pack_root^-1) */
+		{
+			struct model_node const *node = TAG_BLOCK_GET_ELEMENT(&donor->nodes, node_map[index], struct model_node);
+			long rest_node = has_rest ? rest_pose_node(animations_index, rest_count, node->name) : NONE;
+			real_matrix4x3 about_root, rest_inverse;
+
+			if (rest_node != NONE)
+			{
+				real_matrix4x3 moved_root = pack_root_inverse;
+
+				/* (moved in the root's space: the pack's first-person offset) */
+				moved_root.position.x += offset->i;
+				moved_root.position.y += offset->j;
+				moved_root.position.z += offset->k;
+				matrix4x3_multiply(&rest[rest_root], &moved_root, &about_root);
+				matrix4x3_inverse(&rest[rest_node], &rest_inverse);
+				matrix4x3_multiply(&rest_inverse, &about_root, &inverse);
+				matrix4x3_multiply(&binds[node_map[index]], &inverse, &transforms[index]);
+			}
+			else
+			{
+				/* (the third person: as Halo 2 has it about the model's
+				origin, which a unit's hand holds) */
+				matrix4x3_identity(&transforms[index]);
 			}
 		}
 	}
@@ -961,7 +1135,7 @@ static long model_build(struct pack_model const *source, long donor_index, char 
 			long shader_index = shader_build(pack_part->texture, pack_part->flags, shader_source_index);
 			long reference_index;
 
-			if (shader_index == NONE || !part_build(&parts[index], pack_part, node_map, source->node_count, &root))
+			if (shader_index == NONE || !part_build(&parts[index], pack_part, node_map, source->node_count, transforms))
 			{
 				build.failed = TRUE;
 				return NONE;
@@ -973,7 +1147,7 @@ static long model_build(struct pack_model const *source, long donor_index, char 
 			}
 			if (reference_index == model->shaders.count)
 			{
-				reference_set(&shaders[reference_index].shader, SHADER_MODEL_TAG, shader_index);
+				reference_set(&shaders[reference_index].shader, tag_group_of(shader_index), shader_index);
 				shaders[reference_index].permutation_index = 0;
 				model->shaders.count++;
 			}
@@ -987,32 +1161,52 @@ static long model_build(struct pack_model const *source, long donor_index, char 
 
 /* ---------- weapons */
 
-/* a copy of the trigger's projectile and its damage effect, its damage
-scaled */
-static long projectile_build(long projectile_index, real damage, char const *name)
+/* a copy of a damage effect, its damage scaled */
+static long damage_effect_build(long effect_index, real damage, char const *name)
 {
-	struct projectile_definition *projectile;
 	struct damage_effect_definition *effect;
-	long effect_index, index;
 
-	if (projectile_index == NONE || tag_group_of(projectile_index) != PROJECTILE_TAG)
-		return projectile_index;
-	projectile = allocate(sizeof(*projectile));
-	effect = allocate(sizeof(*effect));
-	if (!projectile || !effect)
-		return NONE;
-	memcpy(projectile, tag_get(PROJECTILE_TAG, projectile_index), sizeof(*projectile));
-	effect_index = projectile->projectile.impact_damage.index;
 	if (effect_index == NONE || tag_group_of(effect_index) != DAMAGE_EFFECT_TAG)
-		return projectile_index;
+		return effect_index;
+	effect = allocate(sizeof(*effect));
+	if (!effect)
+		return NONE;
 	memcpy(effect, tag_get(DAMAGE_EFFECT_TAG, effect_index), sizeof(*effect));
 	effect->damage.damage_minimum *= damage;
 	effect->damage.damage_lower_bound *= damage;
 	effect->damage.damage_upper_bound *= damage;
-	index = tag_add(DAMAGE_EFFECT_TAG, effect_index, string_copy(name, " damage"), effect);
-	if (index == NONE)
+	return tag_add(DAMAGE_EFFECT_TAG, effect_index, name, effect);
+}
+
+/* a copy of the trigger's projectile: its damage effect a copy scaled, or
+the one given; a strike's unseen, gone at arm's length */
+static long projectile_build(long projectile_index, real damage, long effect_index, boolean strike, char const *name)
+{
+	struct projectile_definition *projectile;
+
+	if (projectile_index == NONE || tag_group_of(projectile_index) != PROJECTILE_TAG)
+		return projectile_index;
+	projectile = allocate(sizeof(*projectile));
+	if (!projectile)
 		return NONE;
-	reference_set(&projectile->projectile.impact_damage, DAMAGE_EFFECT_TAG, index);
+	memcpy(projectile, tag_get(PROJECTILE_TAG, projectile_index), sizeof(*projectile));
+	if (effect_index == NONE)
+	{
+		effect_index = damage_effect_build(projectile->projectile.impact_damage.index, damage,
+			string_copy(name, " damage"));
+		if (effect_index == NONE && projectile->projectile.impact_damage.index != NONE)
+			return NONE;
+	}
+	reference_set(&projectile->projectile.impact_damage, DAMAGE_EFFECT_TAG, effect_index);
+	if (strike)
+	{
+		reference_set(&projectile->object.model, MODEL_TAG, NONE);
+		reference_set(&projectile->projectile.effect, projectile->projectile.effect.group_tag, NONE);
+		projectile->projectile.maximum_range = SWORD_STRIKE_RANGE;
+		projectile->projectile.initial_velocity = SWORD_STRIKE_SPEED / TICKS_PER_SECOND;
+		projectile->projectile.final_velocity = SWORD_STRIKE_SPEED / TICKS_PER_SECOND;
+		projectile->projectile.air_gravity_scale = 0.0f;
+	}
 	return tag_add(PROJECTILE_TAG, projectile_index, name, projectile);
 }
 
@@ -1048,9 +1242,10 @@ static boolean weapon_build(struct pack_weapon const *source)
 	memcpy(weapon, donor, sizeof(*weapon));
 	snprintf(name, sizeof(name), "%s fp", source->tag);
 	first_person_index = model_build(&source->first_person,
-		donor->weapon.interface_definition.first_person_model.index, name);
+		donor->weapon.interface_definition.first_person_model.index,
+		donor->weapon.interface_definition.first_person_animations.index, &source->first_person_offset, name);
 	third_person_index = first_person_index == NONE ? NONE :
-		model_build(&source->third_person, donor->object.model.index, source->tag);
+		model_build(&source->third_person, donor->object.model.index, NONE, &source->first_person_offset, source->tag);
 	if (third_person_index == NONE)
 	{
 		build.failed = TRUE;
@@ -1071,7 +1266,9 @@ static boolean weapon_build(struct pack_weapon const *source)
 		magazines[0].rounds_total_maximum = source->maximum;
 		magazines[0].rounds_total_initial = (short)MIN(source->maximum, source->magazine * 3);
 	}
-	for (index = 0; index < donor->weapon.triggers.count && index < 1; index++)
+	/* (a sword's triggers each its strike; a gun's first as the pack has
+	it) */
+	for (index = 0; index < donor->weapon.triggers.count && (index < 1 || source->kind == _pack_weapon_sword); index++)
 	{
 		struct weapon_trigger_definition *trigger = &triggers[index];
 
@@ -1089,9 +1286,26 @@ static boolean weapon_build(struct pack_weapon const *source)
 			trigger->projectile_error_angle_lower_bound *= source->error;
 			trigger->projectile_error_angle_upper_bound *= source->error;
 		}
-		if (source->damage > 0.0f && source->damage != 1.0f)
+		if (source->kind == _pack_weapon_sword)
 		{
-			long projectile_index = projectile_build(trigger->projectile.index, source->damage,
+			/* (the strike: the sword's melee damage, else four times the
+			donor's projectile's) */
+			long melee_index = tag_loaded(DAMAGE_EFFECT_TAG, SWORD_MELEE_DAMAGE);
+			long projectile_index = projectile_build(trigger->projectile.index, melee_index == NONE ? 4.0f : 1.0f,
+				melee_index, TRUE, string_copy(source->tag, " strike"));
+
+			if (projectile_index == NONE)
+			{
+				build.failed = TRUE;
+				return FALSE;
+			}
+			reference_set(&trigger->projectile, PROJECTILE_TAG, projectile_index);
+			/* (swung more often than the pistol's shots before it is too hot) */
+			trigger->heat_generated_per_round *= 0.35f;
+		}
+		else if (source->damage > 0.0f && source->damage != 1.0f)
+		{
+			long projectile_index = projectile_build(trigger->projectile.index, source->damage, NONE, FALSE,
 				string_copy(source->tag, " bullet"));
 
 			if (projectile_index == NONE)
@@ -1101,6 +1315,25 @@ static boolean weapon_build(struct pack_weapon const *source)
 			}
 			reference_set(&trigger->projectile, PROJECTILE_TAG, projectile_index);
 		}
+	}
+	if (source->kind == _pack_weapon_sword)
+	{
+		/* (the sword's melee where the map has it, else four times the
+		donor's) */
+		long melee_index = tag_loaded(DAMAGE_EFFECT_TAG, SWORD_MELEE_DAMAGE);
+
+		if (melee_index == NONE)
+		{
+			melee_index = damage_effect_build(donor->weapon.melee_attack_damage.index, 4.0f,
+				string_copy(source->tag, " melee"));
+			if (melee_index == NONE && donor->weapon.melee_attack_damage.index != NONE)
+			{
+				build.failed = TRUE;
+				return FALSE;
+			}
+		}
+		reference_set(&weapon->weapon.melee_attack_damage, DAMAGE_EFFECT_TAG, melee_index);
+		weapon->weapon.zoom_level_count = 0;
 	}
 	if (source->zoom > 1.0f)
 	{

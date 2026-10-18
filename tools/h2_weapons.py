@@ -12,7 +12,9 @@ compressed model vertices, in the space of the Halo weapon it is built on:
 the donor), the textures their shaders draw with (Halo 2's DXT data as it
 is), and the stats the game gives it. The donor's nodes, animations,
 sounds and HUD are the game's: a Halo 2 node is bound to the donor's of
-the same name ("magazine" to "frame magazine"), else to its gun.
+the same name ("magazine" to "frame magazine"), else to its root, and
+each node's bind pose is in the pack: the game moves each vertex from its
+Halo 2 node's bind pose to its donor node's.
 
 Nothing of Halo 2's is kept in this repository: the pack is made from the
 player's files, on their machine.
@@ -121,6 +123,30 @@ def pack_vector(v):
     return (((k << 11) | j) << 11) | i
 
 
+def matrix_from(point, quaternion):
+    """Halo's matrix4x3_from_point_and_quaternion: forward, left, up, position"""
+    i, j, k, w = quaternion
+    n = i * i + j * j + k * k + w * w
+    s = 2.0 / n if n else 0.0
+    x, y, z = s * i, s * j, s * k
+    wx, wy, wz = w * x, w * y, w * z
+    xx, xy, xz, yy, yz, zz = i * x, i * y, i * z, j * y, j * z, k * z
+    return ((1.0 - (yy + zz), xy - wz, xz + wy), (xy + wz, 1.0 - (xx + zz), yz - wx),
+            (xz - wy, yz + wx, 1.0 - (xx + yy)), tuple(point))
+
+
+def matrix_transform(m, v):
+    f, l, u, p = m
+    return tuple(f[a] * v[0] + l[a] * v[1] + u[a] * v[2] + p[a] for a in range(3))
+
+
+def matrix_multiply(a, b):
+    """a after b (Halo's matrix4x3_multiply(a, b))"""
+    f, l, u, p = a
+    rotate = lambda v: tuple(f[c] * v[0] + l[c] * v[1] + u[c] * v[2] for c in range(3))
+    return (rotate(b[0]), rotate(b[1]), rotate(b[2]), matrix_transform(a, b[3]))
+
+
 def compress_int16(value):
     """Halo's compress_real_to_int16_clamp"""
     import math
@@ -144,6 +170,17 @@ class H2Model:
         for i in range(count):
             o = no + i * 0x60
             self.nodes.append((m.string_id(struct.unpack_from("<I", d, o)[0]), struct.unpack_from("<3f", d, o + 12)))
+        # each node's bind pose in the model's space: Halo's matrix layout
+        # (forward, left, up, position), its rotation's w the other way round
+        # from Halo's (the two games' shared rigs say so)
+        self.binds = []
+        for i in range(count):
+            o = no + i * 0x60
+            parent = struct.unpack_from("<h", d, o + 4)[0]
+            translation = struct.unpack_from("<3f", d, o + 12)
+            x, y, z, w = struct.unpack_from("<4f", d, o + 24)
+            local = matrix_from(translation, (x, y, z, -w))
+            self.binds.append(matrix_multiply(self.binds[parent], local) if 0 <= parent < i else local)
         count, mo = m.block(base + 0x60)
         self.materials = []
         for i in range(count):
@@ -272,12 +309,19 @@ def bitmap_data(maps, name):
 
 # Halo 2's node names, and the donor's they are bound to
 NODE_NAMES = {"gun": "frame gun", "magazine": "frame magazine", "ophandle": "frame ophandle",
-              "safety": "frame safety button", "bullet": "frame bullet", "pump": "frame pump"}
+              "safety": "frame safety button", "bullet": "frame bullet", "pump": "frame pump",
+              "body": "frame body", "foregrip": "frame foregrip", "tubes": "frame tubes", "push_bar": "frame push_bar",
+              "handle": "frame handle", "blades": "frame blades"}
 # the materials whose parts are left out: the ammunition counters' digits,
 # and the scopes' glass
 SKIPPED_MATERIALS = ("\\tens", "\\ones", "numbers", "_lens")
-# a part's flags (weapon_tags.c)
+# a part's flags (weapon_tags.c): alpha tested; a sword's glowing blade
 PART_ALPHA_TESTED = 1
+PART_GLOW = 2
+GLOW_MATERIALS = ("energy_blade_top", "energy_blade_bottom")
+# a weapon's kind (weapon_tags.c)
+KIND_GUN = 0
+KIND_SWORD = 1
 # Halo's five levels of detail (super low to super high), each drawn as
 # Halo 2's level above it: Halo 2's super low is left out
 LEVELS = (1, 2, 3, 4, 5)
@@ -301,6 +345,15 @@ WEAPONS = [
         "error": 1.4, "zoom": 0.0, "damage": 0.85,
     },
     {
+        "tag": "weapons\\h2 rocket launcher\\rocket launcher", "display": "H2 ROCKET LAUNCHER",
+        "donor": "weapons\\rocket launcher\\rocket launcher",
+        "first_person": "objects\\weapons\\support_high\\rocket_launcher\\fp_rocket_launcher\\fp_rocket_launcher",
+        "third_person": "objects\\weapons\\support_high\\rocket_launcher\\rocket_launcher",
+        # (the donor's: two rockets, a little less of a blast than Halo's)
+        "magazine": 0, "maximum": 0, "rounds_per_second": 0.0, "projectiles_per_shot": 0, "rounds_per_shot": 0,
+        "error": 1.0, "zoom": 2.0, "damage": 1.0,
+    },
+    {
         "tag": "weapons\\h2 shotgun\\shotgun", "display": "H2 SHOTGUN",
         "donor": "weapons\\shotgun\\shotgun",
         "first_person": "objects\\weapons\\rifle\\shotgun\\fp_shotgun\\fp_shotgun",
@@ -308,11 +361,22 @@ WEAPONS = [
         "magazine": 0, "maximum": 0, "rounds_per_second": 0.0, "projectiles_per_shot": 0, "rounds_per_shot": 0,
         "error": 1.0, "zoom": 0.0, "damage": 1.0,
     },
+    {
+        # (built on the plasma pistol, held as it is: its swing a short-range
+        # strike, its melee the Elites' sword's: weapon_tags.c)
+        "tag": "weapons\\h2 energy sword\\energy sword", "display": "ENERGY SWORD",
+        "donor": "weapons\\plasma pistol\\plasma pistol", "kind": KIND_SWORD,
+        "first_person": "objects\\weapons\\melee\\energy_blade\\fp_energy_blade\\fp_energy_blade",
+        "third_person": "objects\\weapons\\melee\\energy_blade\\energy_blade",
+        "first_person_offset": (-0.03, 0.0, -0.035),
+        "magazine": 0, "maximum": 0, "rounds_per_second": 1.5, "projectiles_per_shot": 1, "rounds_per_shot": 0,
+        "error": 0.1, "zoom": 0.0, "damage": 1.0,
+    },
 ]
 
 
 # (weapon_tags.c reads this version)
-PACK_VERSION = 2
+PACK_VERSION = 4
 
 
 def name_bytes(text, size):
@@ -320,12 +384,14 @@ def name_bytes(text, size):
     return data + b"\0" * (size - len(data))
 
 
-def part_record(maps, model, section, part, local, gun, textures):
+def part_record(maps, model, section, part, local, textures):
     material = model.materials[part["material"]] if part["material"] < len(model.materials) else None
     if not part["strip"] or (material and any(k in material for k in SKIPPED_MATERIALS)):
         return None
     bitmap = (shader_base_bitmap(maps.map, material) if material else None) or SOLID_TEXTURE
     flags = PART_ALPHA_TESTED if material and "alpha_test" in shader_template(maps.map, material) else 0
+    if material and any(k in material for k in GLOW_MATERIALS):
+        flags |= PART_GLOW
     if bitmap not in textures:
         textures[bitmap] = len(textures)
     # (the part's vertices only, renumbered)
@@ -334,9 +400,9 @@ def part_record(maps, model, section, part, local, gun, textures):
     vertices = bytearray()
     for v in used:
         vertex = section["vertices"][v]
-        x, y, z = vertex["position"]
-        # (in the donor's space: its gun at the model's origin)
-        position = (x - gun[0], y - gun[1], z - gun[2])
+        # (in the model's space, its node's bind pose: weapon_tags.c moves it
+        # into the donor's)
+        position = vertex["position"]
         node = local[vertex["node"]] if vertex["node"] < len(local) else 0
         vertices += struct.pack("<3f3I2hBBh", *position, pack_vector(vertex["normal"]),
                                 pack_vector(vertex["binormal"]), pack_vector(vertex["tangent"]),
@@ -354,15 +420,18 @@ def model_record(maps, name, textures):
     regions' sections' parts, each a texture, compressed vertices and a
     strip (in Halo's winding: one index more in front)"""
     model = H2Model(maps, name)
-    gun = next((t for n, t in model.nodes if n == "gun"), (0.0, 0.0, 0.0))
-    node_names = []
-    node_index = {}
-    for n, _ in model.nodes:
-        mapped = NODE_NAMES.get(n, "frame gun")
+    # each node bound to the donor's of its name, else with the root (as
+    # the root, at the root's bind pose); the root's first
+    root_name = NODE_NAMES.get(model.nodes[0][0], "frame gun")
+    node_names, node_binds, node_index = [], [], {}
+    anchors = [i if n in NODE_NAMES else 0 for i, (n, _) in enumerate(model.nodes)]
+    for anchor in [0] + anchors:
+        mapped = NODE_NAMES.get(model.nodes[anchor][0], root_name)
         if mapped not in node_index:
             node_index[mapped] = len(node_names)
             node_names.append(mapped)
-    local = [node_index[NODE_NAMES.get(n, "frame gun")] for n, _ in model.nodes]
+            node_binds.append(model.binds[anchor])
+    local = [node_index[NODE_NAMES.get(model.nodes[a][0], root_name)] for a in anchors]
     regions = model.regions or [tuple([i] * 6) for i in range(len(model.sections))]
     geometries, levels = [], []
     for level in LEVELS:
@@ -370,10 +439,12 @@ def model_record(maps, name, textures):
         if sections not in geometries:
             geometries.append(sections)
         levels.append(geometries.index(sections))
-    record = struct.pack("<H", len(node_names)) + b"".join(name_bytes(n, 32) for n in node_names)
+    record = struct.pack("<H", len(node_names)) + b"".join(
+        name_bytes(n, 32) + struct.pack("<12f", *[c for row in bind for c in row])
+        for n, bind in zip(node_names, node_binds))
     record += struct.pack("<5BxH", *levels, len(geometries))
     for sections in geometries:
-        parts = [p for s in sections for p in (part_record(maps, model, model.sections[s], part, local, gun, textures)
+        parts = [p for s in sections for p in (part_record(maps, model, model.sections[s], part, local, textures)
                                                for part in model.sections[s]["parts"]) if p]
         record += struct.pack("<H", len(parts)) + b"".join(parts)
     return record
@@ -390,7 +461,9 @@ def build(folder, output):
                        name_bytes(weapon["display"], 32) +
                        struct.pack("<hhfhhfff", weapon["magazine"], weapon["maximum"], weapon["rounds_per_second"],
                                    weapon["projectiles_per_shot"], weapon["rounds_per_shot"], weapon["error"],
-                                   weapon["zoom"], weapon["damage"]) + fp + tp)
+                                   weapon["zoom"], weapon["damage"]) +
+                       struct.pack("<HH3f", weapon.get("kind", KIND_GUN), 0, *weapon.get("first_person_offset", (0.0, 0.0, 0.0))) +
+                       fp + tp)
     texture_records = []
     for name, _ in sorted(textures.items(), key=lambda item: item[1]):
         width, height, fmt, levels, data = bitmap_data(maps, name)

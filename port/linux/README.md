@@ -221,16 +221,19 @@ game on one machine plays survival: the Map screen of a network game has
 no SURVIVAL.
 
 With `h2weapons.pak` in the data folder, the shop also sells Halo 2's SMG,
-battle rifle and shotgun (`port/linux/game/weapon_tags.c`). The pack is
+battle rifle, shotgun, rocket launcher and energy sword
+(`port/linux/game/weapon_tags.c`). The pack is
 made from your own copy of Halo 2 (the Xbox game's `shared.map` and
 `mainmenu.map`; nothing of Halo 2's is in this repository):
 
     python3 tools/h2_weapons.py PATH/TO/HALO2/MAPS h2weapons.pak
 
 Each is built on a Halo weapon of the level's (the assault rifle, the
-shotgun), whose animations, sounds and HUD it uses, with Halo 2's models
-and textures and its own magazine, rate of fire, spread, zoom and damage.
-A level without that weapon goes without it.
+shotgun, the rocket launcher), whose animations, sounds and HUD it uses,
+with Halo 2's models and textures and its own magazine, rate of fire,
+spread, zoom and damage. The sword is held as the plasma pistol is: its
+trigger strikes at arm's length and its melee is the Elites' sword's. A
+level without that weapon goes without it.
 
 Network games have split screen too: up to 4 players on each computer. In
 the game lobby, another controller presses START to join, and the new
