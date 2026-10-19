@@ -49,6 +49,8 @@ scenario_tags_unload, after the menus' tags.
 #include "rasterizer/xbox/rasterizer_xbox_hardware_bitmaps.h"
 #include "shaders/shader_definitions.h"
 #include "tag_files/tag_groups.h"
+#include "game/game_allegiance.h"
+#include "units/units.h"
 
 #include "survival.h"
 
@@ -381,6 +383,7 @@ static struct
 	{
 		long definition_index;
 		short burst;
+		short kind;
 		real view[6];
 		real_point3d pivot;
 		char name[PACK_DISPLAY_NAME];
@@ -721,9 +724,22 @@ static void reference_set(struct tag_reference *reference, long group_tag, long 
 	reference->name_length = (long)strlen(reference->name);
 }
 
+/* (the build's table while it is made, else the map's: after the build,
+dual wielding's rest_pose asks too) */
 static long tag_group_of(long tag_index)
 {
-	return tag_index == NONE ? NONE : build.instances[DATUM_INDEX_TO_ABSOLUTE_INDEX(tag_index)].group_tag;
+	struct cache_file_tag_instance *instances = build.instances;
+	long count = 0;
+
+	if (tag_index == NONE)
+		return NONE;
+	if (!instances)
+	{
+		instances = cache_files_tag_instances(&count);
+		if (!instances || DATUM_INDEX_TO_ABSOLUTE_INDEX(tag_index) >= count)
+			return NONE;
+	}
+	return instances[DATUM_INDEX_TO_ABSOLUTE_INDEX(tag_index)].group_tag;
 }
 
 /* ---------- textures */
@@ -1504,6 +1520,7 @@ static boolean weapon_build(struct pack_weapon const *source)
 
 		special->definition_index = index;
 		special->burst = source->burst;
+		special->kind = source->kind;
 		memcpy(special->view, source->view, sizeof(special->view));
 		special->pivot = root_at_rest;
 		snprintf(special->name, sizeof(special->name), "%s", short_name ? short_name + 1 : source->tag);
@@ -1821,4 +1838,93 @@ boolean weapon_tags_rest_root(
 		return found;
 	}
 	return FALSE;
+}
+
+/* ---------- the sword */
+
+/* how far and how wide (the aim's cosine) a sword's lunge reaches, and how
+fast it carries the wielder (world units, per tick) */
+#define SWORD_LUNGE_RANGE 5.0f
+#define SWORD_LUNGE_COSINE 0.85f
+#define SWORD_LUNGE_SPEED 0.32f
+
+/* player_control.c, a unit's controls this tick: with the sword in hand the
+trigger swings it, as Halo 2's (the melee, the sword's own, its swing the
+hold's), and a swing begun with an enemy near in the aim lunges at it */
+void weapon_tags_sword_input(
+	long unit_index,
+	unsigned long *unit_control_flags)
+{
+	static long swinging_units[4] = { NONE, NONE, NONE, NONE };
+	struct unit_datum *unit = unit_index != NONE ? object_try_and_get_and_verify_type(unit_index, _object_mask_unit) : NULL;
+	long weapon_index;
+	struct weapon_datum *weapon;
+	boolean sword = FALSE, pressed;
+	short slot = (short)(DATUM_INDEX_TO_ABSOLUTE_INDEX(unit_index) & 3);
+	long index;
+
+	if (!unit || !VALID_INDEX(unit->unit.current_weapon_index, MAXIMUM_WEAPONS_PER_UNIT))
+		return;
+	weapon_index = unit->unit.weapon_object_indices[unit->unit.current_weapon_index];
+	weapon = weapon_index != NONE ? object_try_and_get_and_verify_type(weapon_index, _object_mask_weapon) : NULL;
+	for (index = 0; weapon && index < weapon_tags.special_count; index++)
+	{
+		if (weapon_tags.specials[index].definition_index == weapon->definition_index &&
+			weapon_tags.specials[index].kind == _pack_weapon_sword)
+		{
+			sword = TRUE;
+		}
+	}
+	if (!sword)
+		return;
+	pressed = TEST_FLAG(*unit_control_flags, _unit_control_weapon_primary_trigger_bit) ||
+		TEST_FLAG(*unit_control_flags, _unit_control_use_equipment_bit);
+	SET_FLAG(*unit_control_flags, _unit_control_weapon_primary_trigger_bit, FALSE);
+	if (pressed)
+		SET_FLAG(*unit_control_flags, _unit_control_use_equipment_bit, TRUE);
+	/* (the lunge, as the swing begins) */
+	if (pressed && swinging_units[slot] != unit_index && unit->object.type == _object_type_biped)
+	{
+		struct object_iterator iterator;
+		struct object_datum *other;
+		long target = NONE;
+		real nearest = SWORD_LUNGE_RANGE;
+
+		object_iterator_new(&iterator, _object_mask_biped, 0);
+		while ((other = object_iterator_next(&iterator)) != NULL)
+		{
+			real_vector3d to;
+			real distance;
+
+			if (iterator.index == unit_index || TEST_FLAG(other->object.damage_flags, _object_dead_bit) ||
+				!game_team_is_enemy(unit->object.owner_team_index, other->object.owner_team_index))
+			{
+				continue;
+			}
+			to.i = other->object.position.x - unit->object.position.x;
+			to.j = other->object.position.y - unit->object.position.y;
+			to.k = other->object.position.z - unit->object.position.z;
+			distance = magnitude3d(&to);
+			if (distance < 0.01f || distance >= nearest)
+				continue;
+			if (dot_product3d(&to, &unit->unit.aiming_vector) / distance < SWORD_LUNGE_COSINE)
+				continue;
+			nearest = distance;
+			target = iterator.index;
+		}
+		if (target != NONE && nearest > 1.0f)
+		{
+			struct object_datum *aimed = object_get(target);
+			real_vector3d to;
+
+			to.i = aimed->object.position.x - unit->object.position.x;
+			to.j = aimed->object.position.y - unit->object.position.y;
+			to.k = 0.0f;
+			normalize3d(&to);
+			unit->object.translational_velocity.i = to.i * SWORD_LUNGE_SPEED;
+			unit->object.translational_velocity.j = to.j * SWORD_LUNGE_SPEED;
+			unit->object.translational_velocity.k = MAX(unit->object.translational_velocity.k, 0.02f);
+		}
+	}
+	swinging_units[slot] = pressed ? unit_index : NONE;
 }

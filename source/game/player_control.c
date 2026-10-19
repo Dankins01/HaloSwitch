@@ -1438,6 +1438,12 @@ static void get_local_player_input_blob(
 					boolean zoom = TEST_FLAG(input->player_control_flags, _player_control_input_zoom_bit);
 
 					survival_input(local_player_index, player->unit_index, gamepad_index);
+					/* port: Halo 2's sword swings with the trigger (port/linux/game/weapon_tags.c) */
+					{
+						extern void weapon_tags_sword_input(long unit_index, unsigned long *unit_control_flags);
+
+						weapon_tags_sword_input(player->unit_index, &input->unit_control_flags);
+					}
 					dual_wield_input(local_player_index, player->unit_index, effective_buttons[_button_switch_weapon],
 						effective_buttons[_button_throw_grenade], effective_buttons[_button_action_reload], &rotate,
 						&grenade, &zoom);

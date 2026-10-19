@@ -263,8 +263,8 @@ is held one-handed, as the pistol is, and dual wields. In first person the
 arms and weapon are moved to where Halo 2 holds it; `h2weapons.view` in
 config.toml tries another place (`"smg=forward,left,up,yaw,pitch,roll"`,
 world units and degrees, several separated by `;`). The sword is held as
-the plasma pistol is: its trigger strikes at arm's length and its melee is
-the Elites' sword's.
+the plasma pistol is: its trigger swings it (the Elites' sword's melee, the
+hold's swing), lunging at an enemy up to 5 units ahead in the aim.
 
 Dual wielding, as Halo 2's (`port/linux/game/dual_wield.c`), in a game on
 one machine: holding a one-handed weapon (the pistol, the plasma pistol, the
