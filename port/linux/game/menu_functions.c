@@ -974,7 +974,26 @@ static void survival_arena_text(short arena, wchar_t *text)
 	if (level == NONE)
 		text[0] = 0;
 	else
+	{
+		long points = 0;
+		short best = survival_arena_best(arena, &points);
+
 		string_get("pc\\main_menu\\map_list", level, text);
+		/* (its best run, as the profile has it) */
+		if (best > 0)
+		{
+			size_t length = 0;
+			char ascii[32];
+			short i;
+
+			while (length < ROW_TEXT_LENGTH - 1 && text[length])
+				length++;
+			snprintf(ascii, sizeof(ascii), "  BEST: WAVE %d", best);
+			for (i = 0; ascii[i] && length < ROW_TEXT_LENGTH - 1; i++)
+				text[length++] = (wchar_t)ascii[i];
+			text[length] = 0;
+		}
+	}
 }
 
 /* the description's map (each list's has both kinds' widgets): a campaign
@@ -3934,8 +3953,7 @@ static void survival_shop_update(struct widget_instance *list)
 		{
 			wide_from_ascii(survival_shop_good_name((short)(shop.first + index)), text, ROW_TEXT_LENGTH);
 			text_set(named(child, "list_item_text", 0), text);
-			snprintf(ascii, sizeof(ascii), "%ld", survival_shop_good_price((short)(shop.first + index)));
-			wide_from_ascii(ascii, text, ROW_TEXT_LENGTH);
+			wide_from_ascii(survival_shop_good_price_text((short)(shop.first + index)), text, ROW_TEXT_LENGTH);
 			text_set(named(child, "price_text", 0), text);
 		}
 		visible_set(named(child, "list_item_arrows", 0), child == list->focused_child);

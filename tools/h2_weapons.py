@@ -314,7 +314,10 @@ NODE_NAMES = {"gun": "frame gun", "magazine": "frame magazine", "ophandle": "fra
               "handle": "frame handle", "blades": "frame blades"}
 # the materials whose parts are left out: the ammunition counters' digits,
 # and the scopes' glass
-SKIPPED_MATERIALS = ("\\tens", "\\ones", "numbers", "_lens")
+SKIPPED_MATERIALS = ("numbers", "_lens")
+# (the ammunition counter's digits: drawn by weapon_tags.c with the assault
+# rifle's counter, the rounds loaded)
+DIGIT_MATERIALS = {"\\ones": 4, "\\tens": 8}
 # a part's flags (weapon_tags.c): alpha tested; a sword's glowing blade
 PART_ALPHA_TESTED = 1
 PART_GLOW = 2
@@ -377,13 +380,8 @@ WEAPONS = [
         "magazine": 0, "maximum": 0, "rounds_per_second": 0.0, "projectiles_per_shot": 0, "rounds_per_shot": 0,
         "error": 1.0, "zoom": 2.0, "damage": 1.0,
     },
-    SHOTGUN,
-    # (where the map has no shotgun: the assault rifle's hold, the shotgun's
-    # magazine and spread made of its bullets)
-    dict(SHOTGUN, donor="weapons\\assault rifle\\assault rifle", magazine=12, maximum=48, rounds_per_second=1.1,
-         projectiles_per_shot=15, rounds_per_shot=1, error=9.0, damage=0.55,
-         # (its pump in the rifle's left hand)
-         first_person_offset=(0.03, 0.0, 0.025), view=(-0.01, -0.01, -0.005, 0.0, 0.0, 0.0)),
+    # (Halo 2's shotgun left out: the shop sells Halo's own where the level
+    # has it, the Halo 2 one on the rifle's hold played badly)
     {
         # (built on the plasma pistol, held as it is: its swing a short-range
         # strike, its melee the Elites' sword's: weapon_tags.c)
@@ -415,6 +413,10 @@ def part_record(maps, model, section, part, local, textures):
     flags = PART_ALPHA_TESTED if material and "alpha_test" in shader_template(maps.map, material) else 0
     if material and any(k in material for k in GLOW_MATERIALS):
         flags |= PART_GLOW
+    for key, bit in DIGIT_MATERIALS.items():
+        if material and material.endswith(key):
+            flags |= bit
+            bitmap = SOLID_TEXTURE
     if bitmap not in textures:
         textures[bitmap] = len(textures)
     # (the part's vertices only, renumbered)

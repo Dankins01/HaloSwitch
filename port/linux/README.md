@@ -208,12 +208,32 @@ Reconciliation's canyon, the beach, the canyon before the bridge), each
 driven by one of the wave's Elites: a Ghost from the third wave, a Banshee
 from the fifth, a Wraith from the seventh, whichever the level has, two of
 different kinds from the seventh. Emptied, they are the players' to take;
-the oldest empty one out of sight goes once four are about.
+the oldest empty one out of sight goes once four are about. On the levels
+that have them, Grunts and Jackals man Covenant turrets on even waves from
+the fourth, and on the open arenas a Phantom flies in on even waves from
+the second, hovering over the place one of the wave's squads comes in.
+Every fifth wave is themed, in turn: Hunters with Elites, the level's
+heaviest (an Elite assault, or a Flood swarm half again as large), and a
+wing of three Banshees where they fly. Every third wave cleared, a supply
+drop falls nearby: one of the level's weapons and a powerup or grenades.
+The HUD's top line counts down to the next wave, then shows the wave's
+enemies left, and the points.
+
+Before the first wave, the shop's top rows are the run's options: the
+skulls, each making the run harder and its points worth more (Black Eye:
+shields recharge only from a melee kill, x1.5; Famine: half the ammunition
+from what is picked up and none between waves, x1.5; Tough Luck: the
+enemies dive away more, x1.25; Mythic: the enemies twice as tough, x1.5;
+Catch: three times the grenades, x1.25), and on the open arenas COVENANT
+VEHICLES on or off (the turrets too). The last three goods bought come
+first in the list after them, marked `*`. The options, these favourites
+and each arena's best run (shown in New Game's SURVIVAL list) are kept in
+`survival.txt` in the save folder.
 The bodies and dropped weapons of the waves before are cleaned up as the
 game goes on, a few at a time and only those out of sight, the newest
 dozen kept. There is
-one life: dying ends the game, with the waves survived, the kills and the
-points on the HUD, and goes back to the main menu. In split screen co-op,
+one life: dying ends the game, with the waves survived, the kills, the
+points and the arena's best on the HUD, and goes back to the main menu. In split screen co-op,
 a player who dies comes back while the other lives. A survival game is
 never saved, so it never takes the place of the campaign's saved game;
 the pause menu's RESTART LEVEL starts it again from the first wave. Only a
@@ -221,7 +241,7 @@ game on one machine plays survival: the Map screen of a network game has
 no SURVIVAL.
 
 With `h2weapons.pak` in the data folder, the shop also sells Halo 2's SMG,
-battle rifle, shotgun, rocket launcher and energy sword
+battle rifle, rocket launcher and energy sword
 (`port/linux/game/weapon_tags.c`). The pack is
 made from your own copy of Halo 2 (the Xbox game's `shared.map` and
 `mainmenu.map`; nothing of Halo 2's is in this repository):
@@ -229,11 +249,12 @@ made from your own copy of Halo 2 (the Xbox game's `shared.map` and
     python3 tools/h2_weapons.py PATH/TO/HALO2/MAPS h2weapons.pak
 
 Each is built on a Halo weapon of the level's (the assault rifle, the
-pistol, the shotgun, the rocket launcher; failing the one it is meant for,
-another, with stats of its own: the shotgun on a level without Halo's is
-held as the assault rifle is), whose animations, sounds and HUD it uses,
+pistol, the rocket launcher; failing the one it is meant for, another,
+with stats of its own: the SMG on a level without the pistol is held as
+the assault rifle is), whose animations, sounds and HUD it uses,
 with Halo 2's models and textures and its own magazine, rate of fire,
-spread, zoom and damage. The battle rifle fires three-round bursts; the SMG
+spread, zoom and damage. The battle rifle fires three-round bursts, its counter showing the rounds
+loaded (the assault rifle's digits); the SMG
 is held one-handed, as the pistol is, and dual wields. In first person the
 arms and weapon are moved to where Halo 2 holds it; `h2weapons.view` in
 config.toml tries another place (`"smg=forward,left,up,yaw,pitch,roll"`,
@@ -250,7 +271,10 @@ rounds are taken). With two, the left
 trigger fires the left one (no grenades, no zoom), X reloads both, and
 tapping Y drops the left one. The left hand's is drawn in first person with
 the right hand's animations, mirrored, its shots coming from the left; while
-one is reloaded it is drawn with both hands and the other is lowered.
+one is reloaded it is drawn with both hands and the other is lowered. The
+two are held apart, turned in toward the crosshair, as Halo 2 holds them,
+and the left one's rounds (or battery and heat) are on the HUD under the
+shields.
 
 Network games have split screen too: up to 4 players on each computer. In
 the game lobby, another controller presses START to join, and the new

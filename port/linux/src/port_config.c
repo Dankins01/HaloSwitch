@@ -398,6 +398,9 @@ static const struct config_setting config_settings[] =
 		"trying it: \"name=forward,left,up,yaw,pitch,roll;...\" (a weapon's name\n"
 		"as \"battle rifle\" or \"smg\"; world units and degrees, the arms and\n"
 		"weapon moved together); empty for the pack's own." },
+	{ "debug.survival_buy", _config_string, "\"\"", "HALO_SURVIVAL_BUY", _environment_value, _platform_all,
+		"Goods the first player buys from the survival shop as the first wave's\n"
+		"wait begins, for tests: their names, \"MARINE FIRETEAM,SHOTGUN\"; empty none." },
 	{ "debug.survival_wave", _config_integer, "0", "HALO_SURVIVAL_WAVE", _environment_value, _platform_all,
 		"The wave a survival game starts at, for tests of later waves; 0 the first." },
 	{ "debug.exit_after", _config_real, "0.0", "HALO_EXIT_AFTER", _environment_value, _platform_all,

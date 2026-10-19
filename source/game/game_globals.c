@@ -86,6 +86,7 @@ symbols in this file:
 #include "game/game_globals.h"
 #include "game/game_allegiance.h"
 #include "scenario/scenario.h"
+#include "survival.h" /* port: port/linux/game/survival.c */
 
 /* ---------- constants */
 
@@ -220,5 +221,7 @@ real game_difficulty_get_team_value(
 		return game_difficulty_get_value_by_difficulty(friend_value_type, difficulty);
 	}
 
-	return game_difficulty_get_value_by_difficulty(value_type, difficulty);
+	/* port: survival's skulls (port/linux/game/survival.c) */
+	return game_difficulty_get_value_by_difficulty(value_type, difficulty) *
+		survival_difficulty_scale(value_type, team_index);
 }

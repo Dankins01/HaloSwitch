@@ -35,6 +35,8 @@ Only a local game (one machine) plays survival.
 #include "ai/ai_scenario_definitions.h"
 #include "ai/ai_script.h"
 #include "game/game.h"
+#include "game/game_allegiance.h"
+#include "game/game_globals.h"
 #include "game/players.h"
 #include "interface/hud_messaging.h"
 #include "items/weapons.h"
@@ -54,6 +56,8 @@ Only a local game (one machine) plays survival.
 #include <string.h>
 
 void platform_log(char const *format, ...);
+#include <stdio.h>
+#include <stdlib.h>
 char const *config_string(char const *name);
 double config_real(char const *name);
 long config_integer(char const *name);
@@ -180,7 +184,41 @@ enum
 	_survival_good_ammunition,
 	_survival_good_fireteam,
 	_survival_good_vehicle, /* put down in front, where there is room */
+	/* the run's options, before its first wave: a skull turned on or off
+	(group_tag: which), the Covenant's vehicles allowed or not */
+	_survival_good_skull,
+	_survival_good_vehicles_option,
 };
+
+/* the skulls: each makes the run harder, its points worth more */
+enum
+{
+	_survival_skull_black_eye = 0, /* shields recharge only on a melee kill */
+	_survival_skull_famine, /* half the ammunition from what is picked up, none between waves */
+	_survival_skull_tough_luck, /* the enemies dive away more */
+	_survival_skull_mythic, /* the enemies twice as tough */
+	_survival_skull_catch, /* the enemies throw many more grenades */
+	NUMBER_OF_SURVIVAL_SKULLS
+};
+
+static struct
+{
+	char const *name;
+	real multiplier;
+} const survival_skulls[NUMBER_OF_SURVIVAL_SKULLS] =
+{
+	{ "BLACK EYE", 1.5f },
+	{ "FAMINE", 1.5f },
+	{ "TOUGH LUCK", 1.25f },
+	{ "MYTHIC", 1.5f },
+	{ "CATCH", 1.25f },
+};
+
+/* the shop's favourites: the last goods bought, first in its list */
+#define SURVIVAL_FAVOURITES 3
+/* the profile (the save folder's): the skulls and options chosen, the
+favourites, each arena's best run */
+#define SURVIVAL_PROFILE_NAME "survival.txt"
 
 struct survival_good
 {
@@ -211,14 +249,35 @@ static struct survival_good const survival_goods[] =
 	{ "PLASMA RIFLE", 200, _survival_good_weapon, 'weap', "weapons\\plasma rifle\\plasma rifle" },
 	{ "NEEDLER", 200, _survival_good_weapon, 'weap', "weapons\\needler\\needler" },
 	{ "SHOTGUN", 300, _survival_good_weapon, 'weap', "weapons\\shotgun\\shotgun" },
-	{ "H2 SHOTGUN", 350, _survival_good_weapon, 'weap', "weapons\\h2 shotgun\\shotgun" },
 	{ "SNIPER RIFLE", 450, _survival_good_weapon, 'weap', "weapons\\sniper rifle\\sniper rifle" },
 	{ "FUEL ROD GUN", 500, _survival_good_weapon, 'weap', "weapons\\fuel rod gun\\fuel rod" },
 	{ "ROCKET LAUNCHER", 600, _survival_good_weapon, 'weap', "weapons\\rocket launcher\\rocket launcher" },
 	{ "H2 ROCKET LAUNCHER", 650, _survival_good_weapon, 'weap', "weapons\\h2 rocket launcher\\rocket launcher" },
 	{ "ENERGY SWORD", 500, _survival_good_weapon, 'weap', "weapons\\h2 energy sword\\energy sword" },
 	{ "WARTHOG", 1000, _survival_good_vehicle, 'vehi', "vehicles\\warthog\\warthog" },
+	/* (before the first wave) */
+	{ "COVENANT VEHICLES", 0, _survival_good_vehicles_option, 0, NULL },
+	{ "BLACK EYE", 0, _survival_good_skull, _survival_skull_black_eye, NULL },
+	{ "FAMINE", 0, _survival_good_skull, _survival_skull_famine, NULL },
+	{ "TOUGH LUCK", 0, _survival_good_skull, _survival_skull_tough_luck, NULL },
+	{ "MYTHIC", 0, _survival_good_skull, _survival_skull_mythic, NULL },
+	{ "CATCH", 0, _survival_good_skull, _survival_skull_catch, NULL },
 };
+
+/* the profile: kept from run to run (survival_profile_load and _save) */
+static struct
+{
+	boolean loaded;
+	unsigned long skulls;
+	boolean no_vehicles;
+	short favourites[SURVIVAL_FAVOURITES];
+	struct
+	{
+		short wave;
+		long points;
+		long kills;
+	} best[NUMBER_OF_SURVIVAL_ARENAS];
+} survival_profile;
 
 /* (the places: a ground squad's starting location where the level's
 encounters fight, chosen for their squads' numbers and kinds; in the
@@ -292,13 +351,36 @@ static struct
 	squads, and what the last purchase did */
 	short good_count;
 	short goods[NUMBEROF(survival_goods)];
+	/* the options, then the favourites, first in the list */
+	short option_count;
+	short favourite_count;
 	short marine_squad_count;
 	struct survival_squad marine_squads[MAXIMUM_SURVIVAL_MARINE_SQUADS];
 	short marine_encounter_count;
 	long marine_encounters[MAXIMUM_SURVIVAL_MARINE_SQUADS];
 	short fireteams;
+	/* debug.survival_buy's goods bought (a test's) */
+	boolean test_bought;
 	char shop_status[64];
 
+	/* the wave the run began at, whether its first has come (the options
+fixed then), and its points' multiplier (the skulls') */
+	short first_wave;
+	boolean begun;
+	real multiplier;
+	/* the wave's theme (a boss wave's), its name */
+	char const *theme;
+	/* the Phantom bringing some of the wave: where it flies from, hovers
+	and leaves to, how far along, and the squad it brings */
+	long phantom_index;
+	short phantom_phase;
+	long phantom_time;
+	real_point3d phantom_from;
+	real_point3d phantom_hover;
+	real_point3d phantom_to;
+	real_vector3d phantom_forward;
+	short phantom_squad;
+	boolean phantom_tried;
 	/* the waves' vehicles, oldest first */
 	short vehicle_count;
 	long vehicles[MAXIMUM_SURVIVAL_VEHICLES];
@@ -382,6 +464,122 @@ static void survival_message(
 			hud_print_message(local_player_index, wide);
 	}
 	platform_log("survival: %s", text);
+}
+
+/* ---------- the profile */
+
+static void survival_profile_path(
+	char *path,
+	size_t size)
+{
+	/* (the game's paths are the Xbox's: its saves' drive, the save folder's) */
+	snprintf(path, size, "u:\\%s", SURVIVAL_PROFILE_NAME);
+}
+
+static void survival_profile_load(
+	void)
+{
+	char path[1024], line[256];
+	FILE *file;
+	short i;
+
+	if (survival_profile.loaded)
+		return;
+	csmemset(&survival_profile, 0, sizeof(survival_profile));
+	survival_profile.loaded = TRUE;
+	for (i = 0; i < SURVIVAL_FAVOURITES; i++)
+		survival_profile.favourites[i] = NONE;
+	survival_profile_path(path, sizeof(path));
+	file = fopen(path, "r");
+	if (!file)
+		return;
+	while (fgets(line, sizeof(line), file))
+	{
+		unsigned long value;
+		int a, b, c, d;
+		long points, kills;
+		char name[64];
+
+		if (sscanf(line, "skulls %lu", &value) == 1)
+			survival_profile.skulls = value & ((1UL << NUMBER_OF_SURVIVAL_SKULLS) - 1);
+		else if (sscanf(line, "vehicles %d", &a) == 1)
+			survival_profile.no_vehicles = !a;
+		else if (sscanf(line, "favourites %d %d %d", &a, &b, &c) == 3)
+		{
+			int list[SURVIVAL_FAVOURITES] = { a, b, c };
+
+			for (i = 0; i < SURVIVAL_FAVOURITES; i++)
+				survival_profile.favourites[i] = (short)(VALID_INDEX(list[i], NUMBEROF(survival_goods)) ? list[i] : NONE);
+		}
+		else if (sscanf(line, "best %63s %d %ld %ld", name, &d, &points, &kills) == 4)
+		{
+			for (i = 0; i < NUMBER_OF_SURVIVAL_ARENAS; i++)
+			{
+				if (!_stricmp(survival_arenas[i].map_name, name))
+				{
+					survival_profile.best[i].wave = (short)d;
+					survival_profile.best[i].points = points;
+					survival_profile.best[i].kills = kills;
+				}
+			}
+		}
+	}
+	fclose(file);
+}
+
+static void survival_profile_save(
+	void)
+{
+	char path[1024];
+	FILE *file;
+	short i;
+
+	survival_profile_path(path, sizeof(path));
+	file = fopen(path, "w");
+	if (!file)
+	{
+		platform_log("survival: could not write %s", path);
+		return;
+	}
+	fprintf(file, "skulls %lu\nvehicles %d\nfavourites %d %d %d\n", survival_profile.skulls,
+		!survival_profile.no_vehicles, survival_profile.favourites[0], survival_profile.favourites[1],
+		survival_profile.favourites[2]);
+	for (i = 0; i < NUMBER_OF_SURVIVAL_ARENAS; i++)
+	{
+		if (survival_profile.best[i].wave > 0)
+		{
+			fprintf(file, "best %s %d %ld %ld\n", survival_arenas[i].map_name, survival_profile.best[i].wave,
+				survival_profile.best[i].points, survival_profile.best[i].kills);
+		}
+	}
+	fclose(file);
+}
+
+static boolean survival_skull(
+	short skull)
+{
+	return survival.active && TEST_FLAG(survival_profile.skulls, skull);
+}
+
+/* the points for the skulls on */
+static real survival_skulls_multiplier(
+	void)
+{
+	real multiplier = 1.0f;
+	short skull;
+
+	for (skull = 0; skull < NUMBER_OF_SURVIVAL_SKULLS; skull++)
+	{
+		if (TEST_FLAG(survival_profile.skulls, skull))
+			multiplier *= survival_skulls[skull].multiplier;
+	}
+	return multiplier;
+}
+
+static long survival_scaled(
+	long points)
+{
+	return (long)((real)points * survival.multiplier + 0.5f);
 }
 
 static real survival_distance_squared(
@@ -723,7 +921,7 @@ static void survival_score(
 			}
 		}
 		if (now < survival.tracked[i].living)
-			survival.points += (survival.tracked[i].living - now) * survival_kill_points(survival.tracked[i].actor_type);
+			survival.points += survival_scaled((survival.tracked[i].living - now) * survival_kill_points(survival.tracked[i].actor_type));
 		survival.tracked[i].living = now;
 	}
 	/* (the dead let go; the new looked at) */
@@ -753,6 +951,7 @@ static void survival_score(
 
 static boolean survival_vehicle_place(struct unit_datum *unit, real length, real width, real_point3d *place,
 	real_vector3d *forward);
+static boolean survival_blocked(real_point3d const *a, real_point3d const *b);
 
 /* the Covenant's vehicles a wave can bring, from its first wave on, on an
 arena open enough (its height), each driven by one of the wave's Elites */
@@ -768,6 +967,30 @@ static struct
 	{ "GHOST", "vehicles\\ghost\\ghost", 3, 2.6f, 1.6f },
 	{ "BANSHEE", "vehicles\\banshee\\banshee", 5, 3.2f, 3.0f },
 	{ "WRAITH", "vehicles\\wraith\\wraith", 7, 5.0f, 3.4f },
+};
+
+/* the Covenant's turrets, manned by a wave's Grunts or Jackals (any arena,
+from the fourth wave, every other) */
+#define SURVIVAL_TURRET_TAG "vehicles\\c gun turret\\c gun turret"
+#define SURVIVAL_TURRET_FIRST_WAVE 4
+
+/* the Phantom: its tag, how long it flies in, hovers once the wave has
+come and flies off, how high it hovers above its squad's place and how far
+off it comes from (world units) */
+#define SURVIVAL_PHANTOM_TAG "vehicles\\c_dropship\\c_dropship"
+#define SURVIVAL_PHANTOM_ARRIVAL (7 * TICKS_PER_SECOND)
+#define SURVIVAL_PHANTOM_HOVER (6 * TICKS_PER_SECOND)
+#define SURVIVAL_PHANTOM_DEPARTURE (8 * TICKS_PER_SECOND)
+#define SURVIVAL_PHANTOM_HEIGHT 4.5f
+#define SURVIVAL_PHANTOM_DISTANCE 45.0f
+#define SURVIVAL_PHANTOM_CLIMB 22.0f
+
+enum
+{
+	_survival_phantom_none = 0,
+	_survival_phantom_arriving,
+	_survival_phantom_hovering,
+	_survival_phantom_leaving,
 };
 
 /* the arenas with room for vehicles: the open ones */
@@ -813,7 +1036,8 @@ static void survival_vehicle_keep(
 odd waves from the third, one (two from the seventh), the kind picked from
 those the wave has reached */
 static void survival_spawn_vehicles(
-	void)
+	short only_kind,
+	short wanted_override)
 {
 	struct survival_arena_definition const *arena = &survival_arenas[survival.arena];
 	long actor_indices[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
@@ -824,17 +1048,19 @@ static void survival_spawn_vehicles(
 	unsigned long used_kinds = 0;
 	short i;
 
-	if (arena->maximum_height < SURVIVAL_VEHICLE_ARENA_HEIGHT || survival.wave < 3 || !(survival.wave & 1))
+	if (arena->maximum_height < SURVIVAL_VEHICLE_ARENA_HEIGHT || survival_profile.no_vehicles)
+		return;
+	if (only_kind == NONE && (survival.wave < 3 || !(survival.wave & 1)))
 		return;
 	for (i = 0; i < NUMBEROF(survival_vehicles); i++)
 	{
-		kinds[i] = survival.wave >= survival_vehicles[i].first_wave ?
+		kinds[i] = (only_kind == NONE ? survival.wave >= survival_vehicles[i].first_wave : i == only_kind) ?
 			tag_loaded('vehi', survival_vehicles[i].tag_name) : NONE;
 		kind_count += kinds[i] != NONE;
 	}
 	if (!kind_count)
 		return;
-	wanted = survival.wave >= 7 ? 2 : 1;
+	wanted = wanted_override > 0 ? wanted_override : survival.wave >= 7 ? 2 : 1;
 	for (i = 0; i < survival.encounter_count && count < MAXIMUM_SURVIVAL_TRACKED_ACTORS; i++)
 	{
 		count += encounter_survival_actors(survival.encounters[i], actor_indices + count, actor_types + count,
@@ -866,7 +1092,7 @@ static void survival_spawn_vehicles(
 		}
 		/* (a second of another kind, if the level has another; never two of
 		a kind) */
-		if (kind >= 0 && TEST_FLAG(used_kinds, kind))
+		if (kind >= 0 && TEST_FLAG(used_kinds, kind) && only_kind == NONE)
 		{
 			short other;
 
@@ -925,9 +1151,211 @@ static void survival_spawn_vehicles(
 		made++;
 		SET_FLAG(used_kinds, kind, TRUE);
 		survival_vehicle_keep(vehicle_index);
-		survival_message("A %s IS COMING", survival_vehicles[kind].name);
+		if (only_kind == NONE)
+			survival_message("A %s IS COMING", survival_vehicles[kind].name);
 		platform_log("survival: wave %d: a %s at %.1f %.1f %.1f", survival.wave, survival_vehicles[kind].name,
 			place.x, place.y, place.z);
+	}
+}
+
+/* the wave's Grunts and Jackals manning turrets the level has: on even
+waves from the fourth, one (two from the eighth), put down by them */
+static void survival_spawn_turrets(
+	void)
+{
+	long actor_indices[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+	short actor_types[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+	short living[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+	long turret_tag = tag_loaded('vehi', SURVIVAL_TURRET_TAG);
+	short count = 0, wanted, made = 0, i;
+
+	if (turret_tag == NONE || survival_profile.no_vehicles || survival.wave < SURVIVAL_TURRET_FIRST_WAVE ||
+		(survival.wave & 1))
+	{
+		return;
+	}
+	wanted = survival.wave >= 8 ? 2 : 1;
+	for (i = 0; i < survival.encounter_count && count < MAXIMUM_SURVIVAL_TRACKED_ACTORS; i++)
+	{
+		count += encounter_survival_actors(survival.encounters[i], actor_indices + count, actor_types + count,
+			living + count, (short)(MAXIMUM_SURVIVAL_TRACKED_ACTORS - count));
+	}
+	for (i = 0; i < count && made < wanted; i++)
+	{
+		struct actor_datum *actor;
+		struct unit_datum *unit;
+		struct unit_definition *definition;
+		struct object_placement_data data;
+		real_point3d place;
+		real_vector3d forward;
+		long turret_index;
+		short seat;
+
+		if ((actor_types[i] != _actor_grunt && actor_types[i] != _actor_jackal) || living[i] <= 0)
+			continue;
+		actor = actor_get(actor_indices[i]);
+		unit = actor->meta.unit_index != NONE ? unit_try_and_get(actor->meta.unit_index) : NULL;
+		if (!unit || unit->object.parent_object_index != NONE || !survival_vehicle_place(unit, 1.6f, 1.6f, &place, &forward))
+			continue;
+		object_placement_data_new(&data, turret_tag, NONE);
+		data.position = place;
+		/* (facing the arena's center) */
+		data.forward.i = survival.center.x - place.x;
+		data.forward.j = survival.center.y - place.y;
+		data.forward.k = 0.0f;
+		if (normalize3d(&data.forward) == 0.0f)
+			data.forward = forward;
+		data.up.i = 0.0f;
+		data.up.j = 0.0f;
+		data.up.k = 1.0f;
+		turret_index = object_new(&data);
+		if (turret_index == NONE)
+			continue;
+		definition = unit_definition_get(unit_get(turret_index)->definition_index);
+		for (seat = 0; seat < definition->unit.seats.count && !unit_seat_is_driver(turret_index, seat); seat++)
+			;
+		if (seat >= definition->unit.seats.count)
+			seat = 0;
+		if (definition->unit.seats.count == 0 || !unit_enter_seat(actor->meta.unit_index, turret_index, seat))
+		{
+			object_delete(turret_index);
+			continue;
+		}
+		made++;
+		survival_vehicle_keep(turret_index);
+		platform_log("survival: wave %d: a turret at %.1f %.1f %.1f", survival.wave, place.x, place.y, place.z);
+	}
+}
+
+/* the Phantom's place along its flight (eased in and out) */
+static void survival_phantom_place(
+	real_point3d const *from,
+	real_point3d const *to,
+	real t)
+{
+	real_point3d position;
+	real eased;
+
+	t = PIN(t, 0.0f, 1.0f);
+	eased = t * t * (3.0f - 2.0f * t);
+	position.x = from->x + (to->x - from->x) * eased;
+	position.y = from->y + (to->y - from->y) * eased;
+	position.z = from->z + (to->z - from->z) * eased;
+	if (object_try_and_get_and_verify_type(survival.phantom_index, _object_mask_vehicle))
+	{
+		struct object_datum *phantom = object_get(survival.phantom_index);
+		real_vector3d up = { 0.0f, 0.0f, 1.0f };
+
+		object_set_position(survival.phantom_index, &position, &survival.phantom_forward, &up);
+		csmemset(&phantom->object.translational_velocity, 0, sizeof(phantom->object.translational_velocity));
+		csmemset(&phantom->object.angular_velocity, 0, sizeof(phantom->object.angular_velocity));
+	}
+}
+
+/* a Phantom flies in over one of the light squads' places as the next
+wave's wait ends, on the open arenas whose level has one, every other wave
+from the second: that squad's group comes from it */
+static void survival_phantom_begin(
+	void)
+{
+	struct object_placement_data data;
+	real_vector3d out;
+	long tag_index = tag_loaded('vehi', SURVIVAL_PHANTOM_TAG);
+	short squad_index;
+
+	survival.phantom_squad = NONE;
+	if (tag_index == NONE || survival.wave < 2 || (survival.wave & 1) ||
+		survival_arenas[survival.arena].maximum_height < SURVIVAL_VEHICLE_ARENA_HEIGHT ||
+		survival.phantom_phase != _survival_phantom_none)
+	{
+		return;
+	}
+	squad_index = survival_random_squad(_survival_tier_light);
+	if (squad_index == NONE)
+		return;
+	survival.phantom_hover = survival.squads[squad_index].nearest;
+	survival.phantom_hover.z += SURVIVAL_PHANTOM_HEIGHT;
+	/* (in from the far side of its place, the way it goes back) */
+	out.i = survival.phantom_hover.x - survival.center.x;
+	out.j = survival.phantom_hover.y - survival.center.y;
+	out.k = 0.0f;
+	if (normalize3d(&out) == 0.0f)
+	{
+		out.i = 1.0f;
+		out.j = 0.0f;
+	}
+	survival.phantom_from.x = survival.phantom_hover.x + out.i * SURVIVAL_PHANTOM_DISTANCE;
+	survival.phantom_from.y = survival.phantom_hover.y + out.j * SURVIVAL_PHANTOM_DISTANCE;
+	survival.phantom_from.z = survival.phantom_hover.z + SURVIVAL_PHANTOM_CLIMB;
+	survival.phantom_to = survival.phantom_from;
+	survival.phantom_to.z += SURVIVAL_PHANTOM_CLIMB;
+	survival.phantom_forward.i = -out.i;
+	survival.phantom_forward.j = -out.j;
+	survival.phantom_forward.k = 0.0f;
+	object_placement_data_new(&data, tag_index, NONE);
+	data.position = survival.phantom_from;
+	data.forward = survival.phantom_forward;
+	data.up.i = 0.0f;
+	data.up.j = 0.0f;
+	data.up.k = 1.0f;
+	survival.phantom_index = object_new(&data);
+	if (survival.phantom_index == NONE)
+		return;
+	survival.phantom_squad = squad_index;
+	survival.phantom_phase = _survival_phantom_arriving;
+	survival.phantom_time = game_time_get();
+	survival_message("A PHANTOM IS INBOUND");
+	platform_log("survival: wave %d: a Phantom to %.1f %.1f %.1f", survival.wave, survival.phantom_hover.x,
+		survival.phantom_hover.y, survival.phantom_hover.z);
+}
+
+/* each tick: the Phantom flown along (kept where it is meant to be, its
+physics undone), and let go once it has left */
+static void survival_phantom_update(
+	void)
+{
+	long now = game_time_get();
+	long elapsed = now - survival.phantom_time;
+
+	if (survival.phantom_phase == _survival_phantom_none)
+		return;
+	if (!object_try_and_get_and_verify_type(survival.phantom_index, _object_mask_vehicle))
+	{
+		survival.phantom_phase = _survival_phantom_none;
+		survival.phantom_index = NONE;
+		return;
+	}
+	switch (survival.phantom_phase)
+	{
+	case _survival_phantom_arriving:
+		survival_phantom_place(&survival.phantom_from, &survival.phantom_hover, (real)elapsed / SURVIVAL_PHANTOM_ARRIVAL);
+		/* (it hovers until its wave has come and a while after) */
+		if (elapsed >= SURVIVAL_PHANTOM_ARRIVAL && survival.state == _survival_state_wave)
+		{
+			survival.phantom_phase = _survival_phantom_hovering;
+			survival.phantom_time = now;
+		}
+		break;
+	case _survival_phantom_hovering:
+		survival_phantom_place(&survival.phantom_hover, &survival.phantom_hover, 1.0f);
+		if (elapsed >= SURVIVAL_PHANTOM_HOVER)
+		{
+			real_point3d const *at = &object_get(survival.phantom_index)->object.position;
+
+			platform_log("survival: the Phantom leaves from %.1f %.1f %.1f", at->x, at->y, at->z);
+			survival.phantom_phase = _survival_phantom_leaving;
+			survival.phantom_time = now;
+		}
+		break;
+	case _survival_phantom_leaving:
+		survival_phantom_place(&survival.phantom_hover, &survival.phantom_to, (real)elapsed / SURVIVAL_PHANTOM_DEPARTURE);
+		if (elapsed >= SURVIVAL_PHANTOM_DEPARTURE)
+		{
+			object_delete(survival.phantom_index);
+			survival.phantom_index = NONE;
+			survival.phantom_phase = _survival_phantom_none;
+		}
+		break;
 	}
 }
 
@@ -938,8 +1366,55 @@ static void survival_spawn_wave(
 	short budget = (short)MIN(4 + 2 * wave, SURVIVAL_MAXIMUM_WAVE_SIZE);
 	short attempts;
 	short placed_by_squad[MAXIMUM_SURVIVAL_SQUADS];
-	boolean boss_wave = wave % 5 == 0 && survival.tier_counts[_survival_tier_boss] > 0;
+	boolean boss_wave = FALSE;
 	real heavy_chance = wave < 2 ? 0.0f : MIN(0.15f * (real)wave, 0.6f);
+	short wing_kind = NONE;
+
+	/* (every fifth wave a themed one, in turn: the Hunters with Elites, the
+	heaviest the level has (its Elites, else its Flood's combat forms), a
+	wing of Banshees where they fly) */
+	survival.theme = NULL;
+	if (wave % 5 == 0)
+	{
+		short theme = (short)((wave / 5 - 1) % 3);
+		boolean flood = FALSE;
+		short i;
+
+		for (i = 0; i < survival.squad_count; i++)
+		{
+			if (survival.squads[i].tier == _survival_tier_heavy && survival.squads[i].actor_type == _actor_combat_form)
+				flood = TRUE;
+		}
+		if (theme == 2)
+		{
+			wing_kind = 1; /* (survival_vehicles' BANSHEE) */
+			if (survival_arenas[survival.arena].maximum_height < SURVIVAL_VEHICLE_ARENA_HEIGHT ||
+				survival_profile.no_vehicles || tag_loaded('vehi', survival_vehicles[wing_kind].tag_name) == NONE ||
+				survival.tier_counts[_survival_tier_heavy] == 0)
+			{
+				wing_kind = NONE;
+				theme = 1;
+			}
+			else
+			{
+				survival.theme = "BANSHEE WING";
+				heavy_chance = 0.8f;
+			}
+		}
+		if (theme == 0 && survival.tier_counts[_survival_tier_boss] > 0)
+		{
+			survival.theme = "HUNTERS";
+			boss_wave = TRUE;
+			heavy_chance = 0.75f;
+		}
+		else if (theme != 2 && survival.tier_counts[_survival_tier_heavy] > 0)
+		{
+			survival.theme = flood ? "FLOOD SWARM" : "ELITE ASSAULT";
+			heavy_chance = 1.0f;
+			if (flood)
+				budget = (short)MIN(budget + budget / 2, SURVIVAL_MAXIMUM_WAVE_SIZE);
+		}
+	}
 
 	switch (game_difficulty_level_get())
 	{
@@ -960,7 +1435,12 @@ static void survival_spawn_wave(
 		struct survival_squad *squad;
 		short placed;
 
-		if (boss_wave)
+		/* (the Phantom's squad first: its group under it) */
+		if (survival.phantom_squad != NONE && attempts == 0)
+		{
+			tier = _survival_tier_light;
+		}
+		else if (boss_wave)
 		{
 			tier = _survival_tier_boss;
 			boss_wave = FALSE;
@@ -974,7 +1454,8 @@ static void survival_spawn_wave(
 		{
 			tier = survival.tier_counts[_survival_tier_light] > 0 ? _survival_tier_light : _survival_tier_heavy;
 		}
-		squad_index = survival_random_squad(tier);
+		squad_index = survival.phantom_squad != NONE && attempts == 0 ? survival.phantom_squad :
+			survival_random_squad(tier);
 		if (squad_index == NONE)
 			break;
 		squad = &survival.squads[squad_index];
@@ -997,7 +1478,9 @@ static void survival_spawn_wave(
 		survival.wave_placed += placed;
 		budget -= group;
 	}
-	survival_spawn_vehicles();
+	survival_spawn_vehicles(wing_kind, wing_kind != NONE ? 3 : 0);
+	survival_spawn_turrets();
+	survival.phantom_squad = NONE;
 	survival.wave_start_living = survival.wave_living = survival_living_count();
 	survival_score();
 	survival_reveal_player();
@@ -1019,7 +1502,8 @@ static void survival_resupply(
 		if (!unit)
 			continue;
 		unit_scripting_set_current_vitality_of(units[player], 1.0e6f, 1.0e6f);
-		for (i = 0; i < MAXIMUM_WEAPONS_PER_UNIT; i++)
+		/* (Famine: no ammunition between waves) */
+		for (i = 0; i < MAXIMUM_WEAPONS_PER_UNIT && !survival_skull(_survival_skull_famine); i++)
 		{
 			long weapon_index = unit->unit.weapon_object_indices[i];
 
@@ -1035,11 +1519,102 @@ static void survival_resupply(
 	}
 }
 
+/* the run over: the arena's best kept if this beat it (the waves
+survived, then the points) */
+static void survival_record_best(
+	void)
+{
+	short waves = (short)MAX(survival.wave - 1, 0);
+
+	if (!VALID_INDEX(survival.arena, NUMBER_OF_SURVIVAL_ARENAS))
+		return;
+	survival_profile_load();
+	if (waves > survival_profile.best[survival.arena].wave ||
+		(waves == survival_profile.best[survival.arena].wave && survival.points > survival_profile.best[survival.arena].points))
+	{
+		survival_profile.best[survival.arena].wave = waves;
+		survival_profile.best[survival.arena].points = survival.points;
+		survival_profile.best[survival.arena].kills = survival.kills;
+		survival_profile_save();
+		if (waves > 0)
+			survival_message("NEW BEST HERE: %d WAVE%s, %ld POINTS", waves, waves == 1 ? "" : "S", survival.points);
+	}
+	else if (survival_profile.best[survival.arena].wave > 0)
+	{
+		survival_message("BEST HERE: %d WAVES, %ld POINTS", survival_profile.best[survival.arena].wave,
+			survival_profile.best[survival.arena].points);
+	}
+}
+
+/* every third wave cleared, goods fall from the sky by the players: one of
+the shop's weapons and a powerup or grenades, the level's */
+#define SURVIVAL_SUPPLY_PERIOD 3
+static void survival_supply_drop(
+	void)
+{
+	long units[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS];
+	short unit_count = survival_player_units(units);
+	short weapons[NUMBEROF(survival_goods)], extras[NUMBEROF(survival_goods)];
+	short weapon_count = 0, extra_count = 0, i, dropped = 0;
+	struct unit_datum *unit;
+	short picks[2];
+
+	if (survival.wave % SURVIVAL_SUPPLY_PERIOD != 0 || unit_count == 0 || !(unit = unit_try_and_get(units[0])))
+		return;
+	for (i = 0; i < NUMBEROF(survival_goods); i++)
+	{
+		struct survival_good const *good = &survival_goods[i];
+
+		if ((good->kind == _survival_good_weapon || good->kind == _survival_good_equipment ||
+			good->kind == _survival_good_frag_grenades || good->kind == _survival_good_plasma_grenades) &&
+			tag_loaded(good->group_tag, good->tag_name) != NONE)
+		{
+			if (good->kind == _survival_good_weapon)
+				weapons[weapon_count++] = i;
+			else
+				extras[extra_count++] = i;
+		}
+	}
+	picks[0] = weapon_count ? weapons[seed_random_range(&survival.seed, 0, weapon_count)] : NONE;
+	picks[1] = extra_count ? extras[seed_random_range(&survival.seed, 0, extra_count)] : NONE;
+	for (i = 0; i < 2; i++)
+	{
+		struct survival_good const *good;
+		struct object_placement_data data;
+		real angle = real_seed_random_range(&survival.seed, 0.0f, 2.0f * (real)M_PI);
+		real_point3d from, above;
+		long tag_index;
+
+		if (picks[i] == NONE)
+			continue;
+		good = &survival_goods[picks[i]];
+		tag_index = tag_loaded(good->group_tag, good->tag_name);
+		/* (2 to 3 units away, dropped from as high as there is room) */
+		from = unit->object.position;
+		from.z += 0.5f;
+		above = from;
+		above.x += (real)cos(angle) * (2.0f + (real)i);
+		above.y += (real)sin(angle) * (2.0f + (real)i);
+		if (survival_blocked(&from, &above))
+			above = from;
+		from = above;
+		above.z += 4.0f;
+		if (survival_blocked(&from, &above))
+			above = from;
+		object_placement_data_new(&data, tag_index, NONE);
+		data.position = above;
+		dropped += object_new(&data) != NONE;
+	}
+	if (dropped)
+		survival_message("SUPPLY DROP NEARBY");
+}
+
 static void survival_set_state(
 	short state)
 {
 	survival.state = state;
 	survival.state_time = game_time_get();
+	survival.phantom_tried = FALSE;
 }
 
 /* the ground under the point (a little above the point's own height, so a
@@ -1181,6 +1756,19 @@ static void survival_begin(
 	survival.points = config_integer("debug.survival_points");
 	survival.tracked_count = 0;
 	survival.fireteams = 0;
+	/* (the player and the Marines allies, as the level's scripts make
+	them, which survival leaves out: without it, a fireteam fights the
+	player; a betrayal still turns them, as in the campaign) */
+	ai_scripting_allegiance(_game_team_player, _game_team_human);
+	survival.test_bought = FALSE;
+	survival.first_wave = survival.wave;
+	survival.begun = FALSE;
+	survival.phantom_index = NONE;
+	survival.phantom_phase = _survival_phantom_none;
+	survival.phantom_squad = NONE;
+	survival.multiplier = 1.0f;
+	survival.theme = NULL;
+	survival_profile_load();
 	survival.shop_status[0] = 0;
 	survival.last_cleanup_time = 0;
 	survival.cleaned = 0;
@@ -1306,6 +1894,7 @@ void survival_update(
 			survival_score();
 			survival_message("YOU SURVIVED %d WAVE%s: %ld KILLS, %ld POINTS", survival.wave - 1,
 				survival.wave - 1 == 1 ? "" : "S", survival.kills, survival.points);
+			survival_record_best();
 		}
 		return;
 	}
@@ -1317,6 +1906,7 @@ void survival_update(
 		survival.last_cleanup_time = now;
 		survival.cleaned += objects_port_collect_old_garbage(SURVIVAL_GARBAGE_KEPT, SURVIVAL_GARBAGE_COLLECTED);
 	}
+	survival_phantom_update();
 	switch (survival.state)
 	{
 	case _survival_state_waiting_for_player:
@@ -1344,10 +1934,66 @@ void survival_update(
 	{
 		long delay = survival.wave == 1 ? SURVIVAL_FIRST_WAVE_DELAY : SURVIVAL_INTERMISSION;
 
+		/* (the Phantom on its way to arrive as the wave comes) */
+		if (survival.phantom_phase == _survival_phantom_none && survival.phantom_squad == NONE &&
+			now - survival.state_time >= delay - SURVIVAL_PHANTOM_ARRIVAL && !survival.phantom_tried)
+		{
+			survival.phantom_tried = TRUE;
+			survival_phantom_begin();
+		}
+
+		/* (debug.survival_buy: a test's goods, bought by the first player) */
+		if (!survival.test_bought && config_string("debug.survival_buy")[0] &&
+			now - survival.state_time >= 2 * TICKS_PER_SECOND)
+		{
+			char names[256];
+			char *name;
+
+			survival.test_bought = TRUE;
+			strncpy(names, config_string("debug.survival_buy"), sizeof(names) - 1);
+			names[sizeof(names) - 1] = 0;
+			for (name = strtok(names, ","); name; name = strtok(NULL, ","))
+			{
+				short i;
+
+				for (i = 0; i < survival.good_count; i++)
+				{
+					if (!_stricmp(survival_goods[survival.goods[i]].name, name))
+					{
+						platform_log("survival: test buys %s: %s", name, survival_shop_buy(i, 0) ? "bought" : survival.shop_status);
+						break;
+					}
+				}
+				if (i == survival.good_count)
+					platform_log("survival: test buys %s: not stocked", name);
+			}
+		}
+
 		if (now - survival.state_time >= delay)
 		{
-			survival_message("WAVE %d (%ld POINTS)", survival.wave, survival.points);
+			if (!survival.begun)
+			{
+				short skull;
+				char skulls[96] = "";
+
+				survival.begun = TRUE;
+				survival.multiplier = survival_skulls_multiplier();
+				for (skull = 0; skull < NUMBER_OF_SURVIVAL_SKULLS; skull++)
+				{
+					if (TEST_FLAG(survival_profile.skulls, skull))
+					{
+						strncat(skulls, skulls[0] ? ", " : "", sizeof(skulls) - strlen(skulls) - 1);
+						strncat(skulls, survival_skulls[skull].name, sizeof(skulls) - strlen(skulls) - 1);
+					}
+				}
+				if (skulls[0])
+					survival_message("SKULLS: %s (POINTS x%.2f)", skulls, survival.multiplier);
+			}
 			survival_spawn_wave();
+			if (survival.theme)
+				survival_message("WAVE %d: %s (%ld POINTS)", survival.wave, survival.theme, survival.points);
+			else
+				survival_message("WAVE %d (%ld POINTS)", survival.wave, survival.points);
 			survival.last_count_time = survival.last_reveal_time = now;
 			survival_set_state(_survival_state_wave);
 		}
@@ -1383,12 +2029,14 @@ void survival_update(
 				now - survival.state_time >= SURVIVAL_WAVE_TIME_LIMIT)
 			{
 				survival.kills += survival.wave_start_living - living;
-				survival.points += SURVIVAL_WAVE_BONUS * survival.wave;
+				survival.points += survival_scaled(SURVIVAL_WAVE_BONUS * survival.wave);
 				platform_log("survival: wave %d cleared; %ld bodies and items cleaned up so far", survival.wave,
 					survival.cleaned);
-				survival_message("WAVE %d CLEARED: +%d, %ld POINTS. Next wave in %d seconds", survival.wave,
-					SURVIVAL_WAVE_BONUS * survival.wave, survival.points, SURVIVAL_INTERMISSION / TICKS_PER_SECOND);
+				survival_message("WAVE %d CLEARED: +%ld, %ld POINTS. Next wave in %d seconds", survival.wave,
+					survival_scaled(SURVIVAL_WAVE_BONUS * survival.wave), survival.points,
+					SURVIVAL_INTERMISSION / TICKS_PER_SECOND);
 				survival_resupply();
+				survival_supply_drop();
 				survival.wave++;
 				survival_set_state(_survival_state_intermission);
 			}
@@ -1426,6 +2074,11 @@ static void survival_shop_stock(
 
 		switch (good->kind)
 		{
+		case _survival_good_skull:
+		case _survival_good_vehicles_option:
+			/* (listed first, below) */
+			stocked = FALSE;
+			break;
 		case _survival_good_fireteam:
 			stocked = survival.marine_squad_count > 0;
 			break;
@@ -1438,6 +2091,53 @@ static void survival_shop_stock(
 		}
 		if (stocked)
 			survival.goods[survival.good_count++] = index;
+	}
+	/* (the favourites first: the last bought, the latest first) */
+	{
+		short favourite, placed = 0;
+
+		for (favourite = 0; favourite < SURVIVAL_FAVOURITES; favourite++)
+		{
+			short good = survival_profile.favourites[favourite], i;
+
+			for (i = placed; good != NONE && i < survival.good_count; i++)
+			{
+				if (survival.goods[i] == good)
+				{
+					memmove(&survival.goods[placed + 1], &survival.goods[placed], (i - placed) * sizeof(short));
+					survival.goods[placed++] = good;
+					break;
+				}
+			}
+		}
+		survival.favourite_count = placed;
+	}
+	/* (before the first wave, the run's options above all) */
+	if (!survival.begun)
+	{
+		short options[NUMBEROF(survival_goods)], option_count = 0;
+
+		for (index = 0; index < NUMBEROF(survival_goods); index++)
+		{
+			if (survival_goods[index].kind == _survival_good_vehicles_option)
+			{
+				if (survival_arenas[survival.arena].maximum_height >= SURVIVAL_VEHICLE_ARENA_HEIGHT)
+					options[option_count++] = index;
+			}
+			else if (survival_goods[index].kind == _survival_good_skull)
+			{
+				options[option_count++] = index;
+			}
+		}
+		option_count = (short)MIN(option_count, NUMBEROF(survival.goods) - survival.good_count);
+		memmove(&survival.goods[option_count], &survival.goods[0], survival.good_count * sizeof(short));
+		memcpy(&survival.goods[0], options, option_count * sizeof(short));
+		survival.good_count += option_count;
+		survival.option_count = option_count;
+	}
+	else
+	{
+		survival.option_count = 0;
 	}
 }
 
@@ -1587,13 +2287,52 @@ short survival_shop_good_count(
 char const *survival_shop_good_name(
 	short index)
 {
-	return VALID_INDEX(index, survival.good_count) ? survival_goods[survival.goods[index]].name : "";
+	static char name[64];
+	struct survival_good const *good;
+
+	if (!VALID_INDEX(index, survival.good_count))
+		return "";
+	good = &survival_goods[survival.goods[index]];
+	switch (good->kind)
+	{
+	case _survival_good_skull:
+		snprintf(name, sizeof(name), "SKULL %s: %s", good->name,
+			TEST_FLAG(survival_profile.skulls, good->group_tag) ? "ON" : "OFF");
+		break;
+	case _survival_good_vehicles_option:
+		snprintf(name, sizeof(name), "%s: %s", good->name, survival_profile.no_vehicles ? "OFF" : "ON");
+		break;
+	default:
+		snprintf(name, sizeof(name), "%s%s", index >= survival.option_count &&
+			index < survival.option_count + survival.favourite_count ? "* " : "", good->name);
+		break;
+	}
+	return name;
 }
 
 long survival_shop_good_price(
 	short index)
 {
 	return VALID_INDEX(index, survival.good_count) ? survival_goods[survival.goods[index]].price : 0;
+}
+
+/* the shop's price column: the points, or a skull's points multiplier */
+char const *survival_shop_good_price_text(
+	short index)
+{
+	static char text[16];
+	struct survival_good const *good;
+
+	if (!VALID_INDEX(index, survival.good_count))
+		return "";
+	good = &survival_goods[survival.goods[index]];
+	if (good->kind == _survival_good_skull)
+		snprintf(text, sizeof(text), "x%.2f", survival_skulls[good->group_tag].multiplier);
+	else if (good->kind == _survival_good_vehicles_option)
+		text[0] = 0;
+	else
+		snprintf(text, sizeof(text), "%ld", good->price);
+	return text;
 }
 
 long survival_points(
@@ -1612,6 +2351,13 @@ void survival_shop_opened(
 	void)
 {
 	survival.shop_status[0] = 0;
+	if (survival.active)
+	{
+		survival_profile_load();
+		survival_shop_stock();
+		if (!survival.begun)
+			survival_shop_say("BEFORE WAVE %d: SKULLS AND OPTIONS AT THE TOP", survival.wave);
+	}
 }
 
 boolean survival_shop_buy(
@@ -1631,6 +2377,27 @@ boolean survival_shop_buy(
 		return FALSE;
 	}
 	good = &survival_goods[survival.goods[index]];
+	if (good->kind == _survival_good_skull || good->kind == _survival_good_vehicles_option)
+	{
+		if (good->kind == _survival_good_skull)
+		{
+			if (survival.begun)
+			{
+				survival_shop_say("SKULLS ARE CHOSEN BEFORE THE FIRST WAVE");
+				return FALSE;
+			}
+			survival_profile.skulls ^= FLAG(good->group_tag);
+			survival_shop_say("%s %s: POINTS x%.2f IN ALL", good->name,
+				TEST_FLAG(survival_profile.skulls, good->group_tag) ? "ON" : "OFF", survival_skulls_multiplier());
+		}
+		else
+		{
+			survival_profile.no_vehicles = !survival_profile.no_vehicles;
+			survival_shop_say("COVENANT VEHICLES %s", survival_profile.no_vehicles ? "OFF" : "ON");
+		}
+		survival_profile_save();
+		return TRUE;
+	}
 	if (!unit)
 	{
 		survival_shop_say("NOT WHILE YOU ARE DEAD");
@@ -1733,6 +2500,17 @@ boolean survival_shop_buy(
 	if (!bought)
 		return FALSE;
 	survival.points -= good->price;
+	/* (a favourite now, the latest first; the list as it was until the shop
+	opens again) */
+	{
+		short good_index = survival.goods[index], i;
+
+		for (i = 0; i < SURVIVAL_FAVOURITES - 1 && survival_profile.favourites[i] != good_index; i++)
+			;
+		memmove(&survival_profile.favourites[1], &survival_profile.favourites[0], i * sizeof(short));
+		survival_profile.favourites[0] = good_index;
+		survival_profile_save();
+	}
 	return TRUE;
 }
 
@@ -1757,4 +2535,116 @@ boolean survival_map_is_arena(
 			return TRUE;
 	}
 	return FALSE;
+}
+
+/* ---------- the skulls' (the engine's hooks) */
+
+/* game_globals.c: the difficulty's value for a team, scaled for the
+skulls: Mythic's enemies' vitality and shields, Catch's grenades */
+real survival_difficulty_scale(
+	short value_type,
+	short team_index)
+{
+	if (!survival.active || !game_team_is_enemy(_game_team_player, team_index) || team_index == _game_team_player)
+		return 1.0f;
+	switch (value_type)
+	{
+	case _game_difficulty_value_enemy_vitality:
+	case _game_difficulty_value_enemy_shield:
+		return survival_skull(_survival_skull_mythic) ? 2.0f : 1.0f;
+	case _game_difficulty_value_grenade_chance_scale:
+		return survival_skull(_survival_skull_catch) ? 3.0f : 1.0f;
+	default:
+		return 1.0f;
+	}
+}
+
+/* actions.c: Tough Luck's enemies dive away from much less danger */
+real survival_dive_threshold_scale(
+	void)
+{
+	return survival_skull(_survival_skull_tough_luck) ? 0.35f : 1.0f;
+}
+
+/* weapons.c: the rounds a player's unit takes from what it picks up
+(Famine: half) */
+short survival_rounds_taken(
+	long unit_index,
+	short rounds)
+{
+	if (survival_skull(_survival_skull_famine) && rounds > 1 && player_index_from_unit_index(unit_index) != NONE)
+		return (short)((rounds + 1) / 2);
+	return rounds;
+}
+
+/* damage.c: whether a player's shield recharges (Black Eye: only from a
+melee kill) */
+boolean survival_shield_recharge_blocked(
+	long object_index)
+{
+	return survival_skull(_survival_skull_black_eye) && player_index_from_unit_index(object_index) != NONE;
+}
+
+/* damage.c: something killed by a melee: Black Eye's shield back to its
+killer, a player */
+void survival_melee_kill(
+	long killer_object_index)
+{
+	if (survival_skull(_survival_skull_black_eye) && killer_object_index != NONE &&
+		player_index_from_unit_index(killer_object_index) != NONE)
+	{
+		struct object_datum *killer = object_try_and_get_and_verify_type(killer_object_index, _object_mask_unit);
+
+		if (killer && killer->object.shield_vitality < 1.0f)
+		{
+			killer->object.shield_vitality = 1.0f;
+			killer->object.shield_stun_ticks = 0;
+		}
+	}
+}
+
+/* ---------- the HUD's (port_hud.c) and the menus' */
+
+/* the line on top of the HUD: the next wave's countdown, else the wave's
+enemies left; FALSE for none */
+boolean survival_hud_status(
+	char *text,
+	size_t size)
+{
+	long now = game_time_get();
+
+	if (!survival.active || survival.lost)
+		return FALSE;
+	switch (survival.state)
+	{
+	case _survival_state_intermission:
+	{
+		long delay = survival.wave == survival.first_wave && !survival.begun ? SURVIVAL_FIRST_WAVE_DELAY :
+			SURVIVAL_INTERMISSION;
+		long left = MAX(delay - (now - survival.state_time), 0);
+
+		snprintf(text, size, "WAVE %d IN %ld   POINTS %ld", survival.wave,
+			(left + TICKS_PER_SECOND - 1) / TICKS_PER_SECOND, survival.points);
+		return TRUE;
+	}
+	case _survival_state_wave:
+		snprintf(text, size, "WAVE %d%s%s   ENEMIES %d   POINTS %ld", survival.wave, survival.theme ? ": " : "",
+			survival.theme ? survival.theme : "", survival.wave_living, survival.points);
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
+/* the arena's best run (New Game's SURVIVAL list): its waves, 0 for none */
+short survival_arena_best(
+	short arena,
+	long *points)
+{
+	survival_profile_load();
+	if (!VALID_INDEX(arena, NUMBER_OF_SURVIVAL_ARENAS))
+		return 0;
+	if (points)
+		*points = survival_profile.best[arena].points;
+	return survival_profile.best[arena].wave;
 }

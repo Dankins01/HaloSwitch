@@ -398,6 +398,7 @@ long dual_wield_left_weapon(long unit_index);
 boolean weapon_tags_first_person_view(long weapon_definition_index, real_point3d const *camera_position,
 	real_vector3d const *camera_forward, real_vector3d const *camera_up, struct real_matrix4x3 *transform);
 void d3d8_port_mirror_winding(int mirrored);
+boolean weapon_tags_rest_root(long weapon_definition_index, real_point3d *root);
 
 /* ---------- public code */
 
@@ -531,6 +532,82 @@ static void first_person_weapon_mirror_matrices(
 	return;
 }
 
+/* port: dual wielding's: each hand's weapon (the right's, the left's drawn
+as its mirror) moved out from the middle of the view and turned in, as
+Halo 2 holds two: its idle pose's root put at the same slant to the right
+of the view's center whatever the weapon, a little higher, the muzzle
+turned toward the crosshair */
+#define DUAL_WIELD_SLANT 0.32f
+#define DUAL_WIELD_RAISE 0.012f
+#define DUAL_WIELD_TURN_DEGREES 9.0f
+
+static void first_person_weapon_dual_place(
+	long weapon_definition_index,
+	struct real_matrix4x3 *matrices,
+	short count)
+{
+	real_point3d root;
+	real_vector3d left, shift;
+	real_point3d pivot;
+	real outward, angle= DUAL_WIELD_TURN_DEGREES*(real)M_PI/180.0f;
+	real c= (real)cos(angle), s= (real)sin(angle);
+	short index;
+
+	if (!weapon_tags_rest_root(weapon_definition_index, &root))
+	{
+		return;
+	}
+	cross_product3d(&render.camera.up, &render.camera.forward, &left);
+	if (normalize3d(&left)==0.0f)
+	{
+		return;
+	}
+	outward= root.y+DUAL_WIELD_SLANT*root.x;
+	shift.i= -outward*left.i+DUAL_WIELD_RAISE*render.camera.up.i;
+	shift.j= -outward*left.j+DUAL_WIELD_RAISE*render.camera.up.j;
+	shift.k= -outward*left.k+DUAL_WIELD_RAISE*render.camera.up.k;
+	pivot.x= render.camera.position.x+root.x*render.camera.forward.i+root.y*left.i+root.z*render.camera.up.i+shift.i;
+	pivot.y= render.camera.position.y+root.x*render.camera.forward.j+root.y*left.j+root.z*render.camera.up.j+shift.j;
+	pivot.z= render.camera.position.z+root.x*render.camera.forward.k+root.y*left.k+root.z*render.camera.up.k+shift.k;
+	for (index= 0; index<count; index++)
+	{
+		struct real_matrix4x3 *matrix= &matrices[index];
+		real_vector3d *vectors[4];
+		real_vector3d relative;
+		short v;
+
+		matrix->position.x+= shift.i;
+		matrix->position.y+= shift.j;
+		matrix->position.z+= shift.k;
+		relative.i= matrix->position.x-pivot.x;
+		relative.j= matrix->position.y-pivot.y;
+		relative.k= matrix->position.z-pivot.z;
+		vectors[0]= &matrix->forward;
+		vectors[1]= &matrix->left;
+		vectors[2]= &matrix->up;
+		vectors[3]= &relative;
+		/* (turned about the view's up: the forward toward the left) */
+		for (v= 0; v<4; v++)
+		{
+			real_vector3d *vector= vectors[v];
+			real along_up= dot_product3d(vector, &render.camera.up);
+			real along_forward= dot_product3d(vector, &render.camera.forward);
+			real along_left= dot_product3d(vector, &left);
+			real turned_forward= c*along_forward-s*along_left;
+			real turned_left= s*along_forward+c*along_left;
+
+			vector->i= along_up*render.camera.up.i+turned_forward*render.camera.forward.i+turned_left*left.i;
+			vector->j= along_up*render.camera.up.j+turned_forward*render.camera.forward.j+turned_left*left.j;
+			vector->k= along_up*render.camera.up.k+turned_forward*render.camera.forward.k+turned_left*left.k;
+		}
+		matrix->position.x= pivot.x+relative.i;
+		matrix->position.y= pivot.y+relative.j;
+		matrix->position.z= pivot.z+relative.k;
+	}
+
+	return;
+}
+
 static void first_person_weapon_fold_off_hand(
 	long hands_model_index,
 	struct real_matrix4x3 *matrices)
@@ -608,6 +685,13 @@ static void first_person_weapon_draw_side(
 					weapon_definition->weapon.interface_definition.first_person_animations.index,
 					first_person_weapon->node_matrices,
 					first_person_weapon->weapon_node_remapping_table);
+				if (dual)
+				{
+					first_person_weapon_dual_place(weapon->definition_index, model_node_matrices,
+						(short)MIN(model_definition_get(
+							weapon_definition->weapon.interface_definition.first_person_model.index)->nodes.count,
+							MAXIMUM_NODES_PER_ANIMATION));
+				}
 				if (mirrored)
 				{
 					first_person_weapon_mirror_matrices(
@@ -644,6 +728,9 @@ static void first_person_weapon_draw_side(
 				if (dual)
 				{
 					first_person_weapon_fold_off_hand(first_person_interface->hands.index, model_node_matrices);
+					first_person_weapon_dual_place(weapon->definition_index, model_node_matrices,
+						(short)MIN(model_definition_get(first_person_interface->hands.index)->nodes.count,
+							MAXIMUM_NODES_PER_ANIMATION));
 				}
 				if (mirrored)
 				{

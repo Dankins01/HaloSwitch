@@ -1387,6 +1387,13 @@ void hud_draw_screen(
 				player->unit_index != NONE)
 			{
 				hud_render_weapon_interface(player);
+				/* port: the port's lines: survival's, the left hand's weapon's
+				(port/linux/game/port_hud.c) */
+				{
+					extern void port_hud_draw(short local_player_index);
+
+					port_hud_draw(render.local_player_index);
+				}
 				hud_show_action_response(player_index);
 				hud_play_unit_sounds(player, hud_scripted_globals->show_hud);
 				hud_render_unit_interface(player);

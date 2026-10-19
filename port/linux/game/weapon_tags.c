@@ -80,6 +80,7 @@ void weapon_tags_burst_control(long weapon_index, word *control_flags);
 boolean weapon_tags_first_person_view(long weapon_definition_index, real_point3d const *camera_position,
 	real_vector3d const *camera_forward, real_vector3d const *camera_up, real_matrix4x3 *transform);
 char const *config_string(char const *name);
+boolean weapon_tags_rest_root(long weapon_definition_index, real_point3d *root);
 
 /* ---------- constants */
 
@@ -130,7 +131,18 @@ enum
 	/* (a sword's blade: drawn with the Elites' sword's glow, if the map has
 	it) */
 	_pack_part_glow_bit,
+	/* (the ammunition counter's digits: the assault rifle's counter's
+	shader, counting the rounds loaded; ones then tens) */
+	_pack_part_digit_ones_bit,
+	_pack_part_digit_tens_bit,
 };
+
+/* the assault rifle's first-person counter (its digits a bitmap's frames,
+told by the weapon's first function, its rounds loaded over its magazine's
+size: as the Halo 2 weapon on its hold's) */
+#define COUNTER_SHADER "weapons\\assault rifle\\fp\\shaders\\numbers"
+#define COUNTER_SHADER_SIZE 0x64
+#define COUNTER_SHADER_LIMIT_OFFSET 0x28
 
 /* a pack weapon's kind */
 enum
@@ -405,6 +417,8 @@ static struct
 		long tag_index;
 	} *shaders;
 	long shader_count;
+	/* the weapon being made's magazine (its counter's highest) */
+	short counter_limit;
 } build;
 
 /* ---------- private code */
@@ -826,6 +840,31 @@ static long shader_source(struct model const *model)
 	return NONE;
 }
 
+/* the counter's shader for a magazine of `limit`: the assault rifle's,
+counting to it; NONE if the map has none */
+static long counter_shader_build(short limit)
+{
+	long source = tag_loaded(SHADER_TRANSPARENT_CHICAGO_TAG, COUNTER_SHADER);
+	char name[PACK_TAG_NAME + 64];
+	byte *shader;
+	long index;
+
+	if (source == NONE || limit <= 0 || limit > 255)
+		return NONE;
+	snprintf(name, sizeof(name), "%scounter %d", SHADER_PREFIX, limit);
+	index = tag_loaded(SHADER_TRANSPARENT_CHICAGO_TAG, name);
+	if (index != NONE)
+		return index;
+	shader = allocate(COUNTER_SHADER_SIZE);
+	if (!shader)
+		return NONE;
+	memcpy(shader, tag_get(SHADER_TRANSPARENT_CHICAGO_TAG, source), COUNTER_SHADER_SIZE);
+	shader[COUNTER_SHADER_LIMIT_OFFSET] = (byte)limit;
+	index = tag_add(SHADER_TRANSPARENT_CHICAGO_TAG, source, name, shader);
+	platform_log("h2 weapons: an ammunition counter to %d%s", limit, index == NONE ? ": failed" : "");
+	return index;
+}
+
 /* a shader of the texture's: the source's, drawing the texture alone (no
 detail, reflection, self-illumination nor change colour) */
 static long shader_build(long texture, unsigned short flags, long source_index)
@@ -1174,8 +1213,20 @@ static long model_build(struct pack_model const *source, long donor_index, long 
 		for (index = 0; index < pack_geometry->part_count; index++)
 		{
 			struct pack_part const *pack_part = &pack_geometry->parts[index];
-			long shader_index = shader_build(pack_part->texture, pack_part->flags, shader_source_index);
+			boolean digit = TEST_FLAG(pack_part->flags, _pack_part_digit_ones_bit) ||
+				TEST_FLAG(pack_part->flags, _pack_part_digit_tens_bit);
+			short permutation_index = TEST_FLAG(pack_part->flags, _pack_part_digit_tens_bit) ? 1 : 0;
+			long shader_index = digit ? counter_shader_build(build.counter_limit) : NONE;
 			long reference_index;
+
+			/* (no counter: the digits drawn plain) */
+			if (shader_index == NONE)
+			{
+				shader_index = shader_build(pack_part->texture,
+					(unsigned short)(pack_part->flags & ~(FLAG(_pack_part_digit_ones_bit) | FLAG(_pack_part_digit_tens_bit))),
+					shader_source_index);
+				permutation_index = 0;
+			}
 
 			if (shader_index == NONE || !part_build(&parts[index], pack_part, node_map, source->node_count, transforms))
 			{
@@ -1184,13 +1235,14 @@ static long model_build(struct pack_model const *source, long donor_index, long 
 			}
 			for (reference_index = 0; reference_index < model->shaders.count; reference_index++)
 			{
-				if (shaders[reference_index].shader.index == shader_index)
+				if (shaders[reference_index].shader.index == shader_index &&
+					shaders[reference_index].permutation_index == permutation_index)
 					break;
 			}
 			if (reference_index == model->shaders.count)
 			{
 				reference_set(&shaders[reference_index].shader, tag_group_of(shader_index), shader_index);
-				shaders[reference_index].permutation_index = 0;
+				shaders[reference_index].permutation_index = permutation_index;
 				model->shaders.count++;
 			}
 			parts[index].shader_index = (short)reference_index;
@@ -1335,6 +1387,9 @@ static boolean weapon_build(struct pack_weapon const *source)
 	}
 	memcpy(weapon, donor, sizeof(*weapon));
 	snprintf(name, sizeof(name), "%s fp", source->tag);
+	build.counter_limit = source->magazine > 0 ? source->magazine :
+		donor->weapon.magazines.count > 0 ?
+			((struct weapon_magazine_definition *)donor->weapon.magazines.address)[0].rounds_loaded_maximum : 0;
 	first_person_index = model_build(&source->first_person,
 		donor->weapon.interface_definition.first_person_model.index,
 		donor->weapon.interface_definition.first_person_animations.index, &source->first_person_offset, &root_at_rest,
@@ -1492,6 +1547,14 @@ static void weapon_tags_release(void)
 
 /* ---------- public code */
 
+static struct
+{
+	long definition_index;
+	boolean found;
+	real_point3d root;
+} rest_roots[32];
+static short rest_root_count;
+
 void weapon_tags_loaded(
 	char const *map_name)
 {
@@ -1501,6 +1564,7 @@ void weapon_tags_loaded(
 	byte *data;
 	struct pack_weapon *weapons = NULL;
 
+	rest_root_count = 0;
 	if (!survival_map_is_arena(map_name))
 		return;
 	/* (the game's paths are the data folder's: d:\\, as the Xbox's) */
@@ -1584,6 +1648,7 @@ done:
 void weapon_tags_unloaded(
 	void)
 {
+	rest_root_count = 0;
 	if (weapon_tags.loaded || weapon_tags.block_count)
 		weapon_tags_release();
 }
@@ -1703,4 +1768,57 @@ boolean weapon_tags_first_person_view(
 	matrix4x3_multiply(&moved, &camera_inverse, &view);
 	matrix4x3_multiply(&camera, &view, transform);
 	return TRUE;
+}
+
+/* dual wielding's (first_person_weapons.c): where a weapon's first-person
+model's root is in its idle animation's first frame, the camera's space
+(forward, left, up); FALSE if it has none. Remembered for the map. */
+boolean weapon_tags_rest_root(
+	long weapon_definition_index,
+	real_point3d *root)
+{
+	struct weapon_definition *definition;
+	real_matrix4x3 rest[MAXIMUM_NODES_PER_MODEL];
+	long rest_count = 0, model_index, animations_index, node;
+	short index;
+
+	for (index = 0; index < rest_root_count; index++)
+	{
+		if (rest_roots[index].definition_index == weapon_definition_index)
+		{
+			*root = rest_roots[index].root;
+			return rest_roots[index].found;
+		}
+	}
+	definition = weapon_definition_get(weapon_definition_index);
+	model_index = definition->weapon.interface_definition.first_person_model.index;
+	animations_index = definition->weapon.interface_definition.first_person_animations.index;
+	root->x = root->y = root->z = 0.0f;
+	if (rest_root_count < (short)NUMBEROF(rest_roots))
+	{
+		boolean found = FALSE;
+
+		if (model_index != NONE && rest_pose(animations_index, rest, &rest_count))
+		{
+			struct model *model = model_definition_get(model_index);
+
+			if (model->nodes.count > 0)
+			{
+				struct model_node *model_root = TAG_BLOCK_GET_ELEMENT(&model->nodes, 0, struct model_node);
+
+				node = rest_pose_node(animations_index, rest_count, model_root->name);
+				if (node != NONE)
+				{
+					*root = rest[node].position;
+					found = TRUE;
+				}
+			}
+		}
+		rest_roots[rest_root_count].definition_index = weapon_definition_index;
+		rest_roots[rest_root_count].found = found;
+		rest_roots[rest_root_count].root = *root;
+		rest_root_count++;
+		return found;
+	}
+	return FALSE;
 }

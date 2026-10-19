@@ -207,6 +207,7 @@ symbols in this file:
 #include "weapon_datum_flags.h"
 #include "weapon_definitions.h"
 #include "weapon_export_function_mode.h"
+#include "survival.h" /* port: port/linux/game/survival.c */
 #include "projectile_definitions.h"
 #include "projectiles.h"
 
@@ -1090,6 +1091,10 @@ boolean weapon_handle_potential_inventory_item(
 				}
 			}
 
+			/* port: survival's Famine skull: a player's unit gets half
+			(port/linux/game/survival.c) */
+			if (rounds_taken > 0 && weapon->object.parent_object_index != NONE)
+				rounds_taken = survival_rounds_taken(weapon->object.parent_object_index, rounds_taken);
 			magazine->rounds_total += rounds_taken;
 			*rounds_picked_up = rounds_taken;
 		}

@@ -250,6 +250,7 @@ symbols in this file:
 #include "units/unit_definitions.h"
 #include "units/vehicle_definitions.h"
 #include "units/vehicles.h"
+#include "survival.h" /* port: port/linux/game/survival.c */
 
 /* ---------- constants */
 
@@ -4317,6 +4318,9 @@ boolean actor_action_handle_evasion(
 			dive_threshold =
 				definition->defensive.evasion_danger_threshold_defending;
 		}
+
+		/* port: survival's Tough Luck skull (port/linux/game/survival.c) */
+		dive_threshold *= survival_dive_threshold_scale();
 
 		if (actor->external_orders.playfighting &&
 			definition->defensive.evasion_seek_cover_chance > 0.0f &&

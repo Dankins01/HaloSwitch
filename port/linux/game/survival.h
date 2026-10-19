@@ -68,6 +68,35 @@ void survival_shop_opened(
 boolean survival_shop_buy(
 	short index,
 	short local_player_index);
+/* the shop's price column: points, or a skull's multiplier */
+char const *survival_shop_good_price_text(
+	short index);
+
+/* the skulls' hooks: game_globals.c's difficulty values, actions.c's dive,
+weapons.c's rounds picked up, damage.c's shield recharge and melee kills */
+real survival_difficulty_scale(
+	short value_type,
+	short team_index);
+real survival_dive_threshold_scale(
+	void);
+short survival_rounds_taken(
+	long unit_index,
+	short rounds);
+boolean survival_shield_recharge_blocked(
+	long object_index);
+void survival_melee_kill(
+	long killer_object_index);
+
+/* port_hud.c: the line on top of the HUD (the wave's countdown or its
+enemies left); FALSE for none */
+boolean survival_hud_status(
+	char *text,
+	size_t size);
+/* New Game's SURVIVAL list: an arena's best run, its waves (0: none) */
+short survival_arena_best(
+	short arena,
+	long *points);
+
 /* menu_tags.c: the map loading is a survival game's arena (its own name:
 "b30"), whose pause menu has the shop */
 boolean survival_map_is_arena(

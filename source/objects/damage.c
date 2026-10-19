@@ -137,6 +137,7 @@ symbols in this file:
 #include "units/bipeds.h"
 #include "units/units.h"
 #include "units/vehicles.h"
+#include "survival.h" /* port: port/linux/game/survival.c */
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
@@ -1078,6 +1079,13 @@ static void object_damage_aftermath(
 		}
 	}
 
+	/* port: survival's Black Eye skull: a melee kill (port/linux/game/survival.c) */
+	if (TEST_FLAG(being_damaged_flags, _object_being_damaged_body_depleted_bit) &&
+		damage_effect->damage.category == _damage_category_melee)
+	{
+		survival_melee_kill(damage->owner_object_index);
+	}
+
 	if (game_engine_can_score() &&
 		!TEST_FLAG(damage->flags, _damage_no_statistics_bit))
 	{
@@ -1999,7 +2007,12 @@ void object_damage_update(
 		}
 		else if (object->object.shield_vitality < 1.f)
 		{
-			if (object->object.shield_stun_ticks == 0)
+			/* port: survival's Black Eye skull: a player's shield recharges
+			only from a melee kill (port/linux/game/survival.c) */
+			if (survival_shield_recharge_blocked(object_index))
+			{
+			}
+			else if (object->object.shield_stun_ticks == 0)
 			{
 				real shield_recharge =
 					collision_model->resistance.runtime_shield_recharge_velocity;
