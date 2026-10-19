@@ -4,7 +4,10 @@
 Xbox game's maps: shared.map, and mainmenu.map, which holds their geometry
 and textures).
 
-    python3 tools/h2_weapons.py HALO2_MAPS_FOLDER OUTPUT.pak
+    python3 tools/h2_weapons.py HALO2_MAPS_FOLDER OUTPUT.pak [HALO3_MAPS_FOLDER]
+
+With Halo 3's maps folder (the Xbox 360 game's: a level's map and the
+shared maps, tools/h3_maps.py), Halo 3's weapons are added too.
 
 For each weapon: its first-person and third-person models (Halo 2's
 render models: each section's vertices and strips, re-encoded as Halo's
@@ -89,6 +92,21 @@ class H2Maps:
         self.folder = folder
         self.map = H2Map(os.path.join(folder, name))
         self.files = {}
+
+    # (the pack's texture names: Halo 2's own)
+    prefix = ""
+
+    def model(self, name):
+        return H2Model(self, name)
+
+    def shader_base_bitmap(self, shader_name):
+        return shader_base_bitmap(self.map, shader_name)
+
+    def shader_template(self, shader_name):
+        return shader_template(self.map, shader_name)
+
+    def bitmap_data(self, name):
+        return bitmap_data(self, name)
 
     def raw(self, pointer, size):
         location = pointer >> 30
@@ -396,6 +414,30 @@ WEAPONS = [
 ]
 
 
+# ---------- Halo 3's (tools/h3_maps.py: from a level's map, its models'
+# geometry in it and the shared maps)
+
+SPARTAN_LASER = {
+    "game": "h3", "level": "riverworld.map",
+    "tag": "weapons\\h3 spartan laser\\spartan laser", "display": "SPARTAN LASER",
+    # (on the sniper rifle's hold: its shot instant, hitting as hard as the
+    # laser does; five shots, slow)
+    "donor": "weapons\\sniper rifle\\sniper rifle",
+    "first_person": "objects\\weapons\\support_high\\spartan_laser\\fp_spartan_laser\\fp_spartan_laser",
+    "third_person": "objects\\weapons\\support_high\\spartan_laser\\spartan_laser",
+    "magazine": 5, "maximum": 10, "rounds_per_second": 0.6, "projectiles_per_shot": 1, "rounds_per_shot": 1,
+    "error": 0.0, "zoom": 2.0, "damage": 5.0,
+    # (low on the right, its barrel in toward the crosshair, as Halo 3's)
+    "view": (0.08, -0.07, -0.06, 4.0, 0.0, 0.0),
+}
+WEAPONS += [
+    SPARTAN_LASER,
+    # (where the map has no sniper rifle: the rocket launcher's hold)
+    dict(SPARTAN_LASER, donor="weapons\\rocket launcher\\rocket launcher", damage=2.0,
+         view=(0.1, -0.03, -0.07, 2.0, 0.0, 0.0)),
+]
+
+
 # (weapon_tags.c reads this version)
 PACK_VERSION = 5
 
@@ -409,14 +451,17 @@ def part_record(maps, model, section, part, local, textures):
     material = model.materials[part["material"]] if part["material"] < len(model.materials) else None
     if not part["strip"] or (material and any(k in material for k in SKIPPED_MATERIALS)):
         return None
-    bitmap = (shader_base_bitmap(maps.map, material) if material else None) or SOLID_TEXTURE
-    flags = PART_ALPHA_TESTED if material and "alpha_test" in shader_template(maps.map, material) else 0
+    bitmap = (maps.shader_base_bitmap(material) if material else None) or SOLID_TEXTURE
+    template = maps.shader_template(material) if material else ""
+    flags = PART_ALPHA_TESTED if "alpha_test" in template or is_h3_blended(template) else 0
     if material and any(k in material for k in GLOW_MATERIALS):
         flags |= PART_GLOW
     for key, bit in DIGIT_MATERIALS.items():
         if material and material.endswith(key):
             flags |= bit
             bitmap = SOLID_TEXTURE
+    # (each texture by the maps it is from)
+    bitmap = (maps if bitmap != SOLID_TEXTURE else None, bitmap)
     if bitmap not in textures:
         textures[bitmap] = len(textures)
     # (the part's vertices only, renumbered)
@@ -444,7 +489,7 @@ def model_record(maps, name, textures):
     each of Halo's levels of detail draws, and the geometries: each its
     regions' sections' parts, each a texture, compressed vertices and a
     strip (in Halo's winding: one index more in front)"""
-    model = H2Model(maps, name)
+    model = maps.model(name)
     # each node bound to the donor's of its name, else with the root (as
     # the root, at the root's bind pose); the root's first
     root_name = NODE_NAMES.get(model.nodes[0][0], "frame gun")
@@ -475,16 +520,46 @@ def model_record(maps, name, textures):
     return record
 
 
-def build(folder, output):
-    maps = H2Maps(folder)
+def is_h3_blended(template):
+    """a Halo 3 shader template's name (its options' digits): alpha tested,
+    or blended (a decal's): drawn alpha tested"""
+    name = template.rsplit("\\", 1)[-1]
+    if not name.startswith("_"):
+        return False
+    options = name.strip("_").split("_")
+    return len(options) > 6 and (options[2] != "0" or options[6] != "0")
+
+
+def texture_name(maps, name):
+    """a texture's name in the pack: Halo 2's own, Halo 3's under h3\\ (its
+    last two names: the pack's names are 63 characters at most)"""
+    if maps is None or not maps.prefix:
+        return name
+    return maps.prefix + "\\".join(name.split("\\")[-2:])
+
+
+def build(folder, output, h3_folder=None):
+    games = {"h2": H2Maps(folder)}
+    if h3_folder:
+        from h3_maps import H3Maps
+
+        class Halo3(H3Maps):
+            prefix = "h3\\"
+        games["h3"] = {level: Halo3(h3_folder, level) for level in sorted({w["level"] for w in WEAPONS if w.get("game") == "h3"})}
     textures = {}
     records = []
     built = {}
     for weapon in WEAPONS:
+        if weapon.get("game", "h2") == "h3":
+            if "h3" not in games:
+                continue
+            maps = games["h3"][weapon["level"]]
+        else:
+            maps = games["h2"]
         for key in ("first_person", "third_person"):
-            if weapon[key] not in built:
-                built[weapon[key]] = model_record(maps, weapon[key], textures)
-        fp, tp = built[weapon["first_person"]], built[weapon["third_person"]]
+            if (maps, weapon[key]) not in built:
+                built[(maps, weapon[key])] = model_record(maps, weapon[key], textures)
+        fp, tp = built[(maps, weapon["first_person"])], built[(maps, weapon["third_person"])]
         records.append(name_bytes(weapon["tag"], 64) + name_bytes(weapon["donor"], 64) +
                        name_bytes(weapon["display"], 32) +
                        struct.pack("<hhfhhfff", weapon["magazine"], weapon["maximum"], weapon["rounds_per_second"],
@@ -495,9 +570,9 @@ def build(folder, output):
                        struct.pack("<6f", *weapon.get("view", (0.0,) * 6)) +
                        fp + tp)
     texture_records = []
-    for name, _ in sorted(textures.items(), key=lambda item: item[1]):
-        width, height, fmt, levels, data = bitmap_data(maps, name)
-        texture_records.append(name_bytes(name, 64) + struct.pack("<HHHHI", width, height, fmt, levels, len(data)) +
+    for (maps, name), _ in sorted(textures.items(), key=lambda item: item[1]):
+        width, height, fmt, levels, data = maps.bitmap_data(name) if maps else bitmap_data(None, name)
+        texture_records.append(name_bytes(texture_name(maps, name), 64) + struct.pack("<HHHHI", width, height, fmt, levels, len(data)) +
                                data)
     with open(output, "wb") as f:
         f.write(b"H2WP" + struct.pack("<III", PACK_VERSION, len(records), len(texture_records)))
@@ -509,6 +584,6 @@ def build(folder, output):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         sys.exit(__doc__)
-    build(sys.argv[1], sys.argv[2])
+    build(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else None)

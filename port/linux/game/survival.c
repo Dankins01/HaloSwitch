@@ -267,6 +267,8 @@ static struct survival_good const survival_goods[] =
 	{ "ROCKET LAUNCHER", 600, _survival_good_weapon, 'weap', "weapons\\rocket launcher\\rocket launcher" },
 	{ "H2 ROCKET LAUNCHER", 650, _survival_good_weapon, 'weap', "weapons\\h2 rocket launcher\\rocket launcher" },
 	{ "ENERGY SWORD", 500, _survival_good_weapon, 'weap', "weapons\\h2 energy sword\\energy sword" },
+	/* (Halo 3's: the same pack's, from the player's Halo 3 maps) */
+	{ "SPARTAN LASER", 750, _survival_good_weapon, 'weap', "weapons\\h3 spartan laser\\spartan laser" },
 	{ "WARTHOG", 1000, _survival_good_vehicle, 'vehi', "vehicles\\warthog\\warthog" },
 	/* (before the first wave) */
 	{ "COVENANT VEHICLES", 0, _survival_good_vehicles_option, 0, NULL },

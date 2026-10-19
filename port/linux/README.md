@@ -250,7 +250,14 @@ battle rifle, rocket launcher and energy sword
 made from your own copy of Halo 2 (the Xbox game's `shared.map` and
 `mainmenu.map`; nothing of Halo 2's is in this repository):
 
-    python3 tools/h2_weapons.py PATH/TO/HALO2/MAPS h2weapons.pak
+    python3 tools/h2_weapons.py PATH/TO/HALO2/MAPS h2weapons.pak [PATH/TO/HALO3/MAPS]
+
+With your Halo 3 maps folder too (the Xbox 360 game's `maps`, as
+extracted from its disc: `riverworld.map` and the shared `mainmenu.map`
+and `shared.map`; `tools/h3_maps.py` reads them, and needs numpy and
+Pillow), the pack also has Halo 3's Spartan Laser, which the shop sells
+(on the sniper rifle's hold, else the rocket launcher's: five shots that
+hit very hard). Its textures are resampled to powers of two.
 
 Each is built on a Halo weapon of the level's (the assault rifle, the
 pistol, the rocket launcher; failing the one it is meant for, another,
