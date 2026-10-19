@@ -1003,7 +1003,7 @@ static struct
 } const survival_vehicles[] =
 {
 	{ "GHOST", "vehicles\\ghost\\ghost", 3, 2.6f, 1.6f },
-	{ "BANSHEE", "vehicles\\banshee\\banshee", 5, 3.2f, 3.0f },
+	{ "BANSHEE", "vehicles\\banshee\\banshee", 9, 3.2f, 3.0f },
 	{ "WRAITH", "vehicles\\wraith\\wraith", 7, 5.0f, 3.4f },
 };
 
@@ -1015,6 +1015,8 @@ from the fourth wave, every other) */
 /* the wave's enemies come one at a time, this often, each in the co-op
 teleport's flash */
 #define SURVIVAL_ARRIVAL_PERIOD (TICKS_PER_SECOND * 2 / 5)
+/* the most of the waves' enemies about at once */
+#define SURVIVAL_MAXIMUM_LIVING 14
 #define SURVIVAL_ARRIVAL_EFFECT "effects\\coop teleport"
 
 /* the Phantom: its tag, how long it flies in, hovers once the wave has
@@ -1406,7 +1408,7 @@ static void survival_spawn_wave(
 	void)
 {
 	short wave = survival.wave;
-	short budget = (short)MIN(4 + 2 * wave, SURVIVAL_MAXIMUM_WAVE_SIZE);
+	short budget = (short)MIN(4 + 3 * wave / 2, SURVIVAL_MAXIMUM_WAVE_SIZE);
 	short attempts;
 	short placed_by_squad[MAXIMUM_SURVIVAL_SQUADS];
 	boolean boss_wave = FALSE;
@@ -1448,14 +1450,18 @@ static void survival_spawn_wave(
 		{
 			survival.theme = "HUNTERS";
 			boss_wave = TRUE;
-			heavy_chance = 0.75f;
+			heavy_chance = 0.4f;
+			/* (the Hunters the wave's weight: fewer others) */
+			budget = (short)MAX(budget - 4, 6);
 		}
 		else if (theme != 2 && survival.tier_counts[_survival_tier_heavy] > 0)
 		{
 			survival.theme = flood ? "FLOOD SWARM" : "ELITE ASSAULT";
 			heavy_chance = 1.0f;
 			if (flood)
-				budget = (short)MIN(budget + budget / 2, SURVIVAL_MAXIMUM_WAVE_SIZE);
+				budget = (short)MIN(budget + budget / 3, SURVIVAL_MAXIMUM_WAVE_SIZE);
+			else
+				budget = (short)MAX(budget * 2 / 3, 6);
 		}
 	}
 
@@ -1565,6 +1571,9 @@ static void survival_arrivals_update(
 
 		if (now - survival.last_arrival_time < SURVIVAL_ARRIVAL_PERIOD)
 			return;
+		/* (no more than so many at once: the rest come as they fall) */
+		if (survival_living_count() >= SURVIVAL_MAXIMUM_LIVING)
+			return;
 		survival.last_arrival_time = now;
 		squad = &survival.squads[survival.pending[survival.pending_next].squad_index];
 		before_count = encounter_survival_actors(squad->encounter_index, before, types, living,
@@ -1605,7 +1614,7 @@ static void survival_arrivals_update(
 	if (survival.extras_pending)
 	{
 		survival.extras_pending = FALSE;
-		survival_spawn_vehicles(survival.wing_kind, survival.wing_kind != NONE ? 3 : 0);
+		survival_spawn_vehicles(survival.wing_kind, survival.wing_kind != NONE ? 2 : 0);
 		survival_spawn_turrets();
 		platform_log("survival: wave %d: all %d come", survival.wave, survival.wave_placed);
 	}
@@ -2806,7 +2815,14 @@ void survival_input(
 		return;
 	if (survival.charges[local_player_index] <= 0)
 	{
-		survival_message("NO HEALTH & OVERSHIELD BANKED (THE SHOP SELLS THEM)");
+		/* (said once in a while, not at every press) */
+		static long last_said = -1000000;
+
+		if (game_time_get() - last_said >= 10 * TICKS_PER_SECOND)
+		{
+			last_said = game_time_get();
+			survival_message("NO HEALTH & OVERSHIELD BANKED (THE SHOP SELLS THEM)");
+		}
 		return;
 	}
 	survival.charges[local_player_index]--;

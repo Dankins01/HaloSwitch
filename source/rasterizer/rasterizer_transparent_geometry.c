@@ -416,6 +416,25 @@ static void rasterizer_sort_internal(
 	return;
 }
 
+/* port: the groups' drawing order as one consistent key (the original's
+comparison answered -1 both ways for two water groups and let a first-person
+group with a draw-before-water shader, the Elites' sword's blade, sort among
+the water's; another qsort than the Xbox's then interleaved first-person and
+world groups, drawing the world with the first person's depth range): the
+Cortana hack's last, then the water decals, the water, the world's and the
+first person's, each by its z sort and its object */
+static short group_sort_category(
+	struct transparent_geometry_group const *group)
+{
+	if (group->geometry_flags & FLAG(_rasterizer_geometry_first_person_bit))
+		return 3;
+	if (shader_is_water_decal(group->shader))
+		return 0;
+	if (group->shader && group->shader->base.type==_shader_type_transparent_water)
+		return 1;
+	return 2;
+}
+
 static int __cdecl group_sorted_indices_cmpfn(
 	void const *group_index1_pointer,
 	void const *group_index2_pointer)
@@ -424,7 +443,7 @@ static int __cdecl group_sorted_indices_cmpfn(
 	short const *group_index2 = group_index2_pointer;
 	struct transparent_geometry_group *group1;
 	struct transparent_geometry_group *group2;
-	long comparison = 0;
+	short category1, category2;
 
 	match_assert(
 		"c:\\halo\\SOURCE\\rasterizer\\rasterizer_transparent_geometry.c",
@@ -438,67 +457,17 @@ static int __cdecl group_sorted_indices_cmpfn(
 	group1 = transparent_geometry_groups + *group_index1;
 	group2 = transparent_geometry_groups + *group_index2;
 
-	if (shader_is_water_decal(group1->shader))
-	{
-		comparison = -1;
-		goto cortana_tiebreak;
-	}
-	if (shader_is_water_decal(group2->shader))
-	{
-		comparison = 1;
-		goto cortana_tiebreak;
-	}
-
-	if (!group1->shader || group1->shader->base.type!=_shader_type_transparent_water)
-	{
-		if (group2->shader && group2->shader->base.type==_shader_type_transparent_water)
-		{
-			comparison = 1;
-			goto cortana_tiebreak;
-		}
-
-		if ((group1->geometry_flags & FLAG(_rasterizer_geometry_first_person_bit)) &&
-			!(group2->geometry_flags & FLAG(_rasterizer_geometry_first_person_bit)))
-		{
-			comparison = 1;
-			goto cortana_tiebreak;
-		}
-
-		if (!(group2->geometry_flags & FLAG(_rasterizer_geometry_first_person_bit)) ||
-			(group1->geometry_flags & FLAG(_rasterizer_geometry_first_person_bit)))
-		{
-			if (group1->z_sort>group2->z_sort)
-			{
-				comparison = 1;
-				goto cortana_tiebreak;
-			}
-			if (!(group1->z_sort<group2->z_sort))
-			{
-				if (group1->source_object_index>group2->source_object_index)
-				{
-					comparison = 1;
-					goto cortana_tiebreak;
-				}
-				if (group1->source_object_index>=group2->source_object_index)
-				{
-					goto cortana_tiebreak;
-				}
-			}
-		}
-	}
-	comparison = -1;
-
-	cortana_tiebreak:
-	if (group1->cortana_hack && !group2->cortana_hack)
-	{
-		return 1;
-	}
-	if (group2->cortana_hack && !group1->cortana_hack)
-	{
-		return -1;
-	}
-
-	return comparison;
+	if ((group1->cortana_hack!=0)!=(group2->cortana_hack!=0))
+		return group1->cortana_hack ? 1 : -1;
+	category1 = group_sort_category(group1);
+	category2 = group_sort_category(group2);
+	if (category1!=category2)
+		return category1>category2 ? 1 : -1;
+	if (group1->z_sort!=group2->z_sort)
+		return group1->z_sort>group2->z_sort ? 1 : -1;
+	if (group1->source_object_index!=group2->source_object_index)
+		return group1->source_object_index>group2->source_object_index ? 1 : -1;
+	return *group_index1>*group_index2 ? 1 : (*group_index1<*group_index2 ? -1 : 0);
 }
 
 static void rasterizer_sort_external(
@@ -561,7 +530,9 @@ void rasterizer_transparent_geometry_draw(
 			{
 				struct shader *shader = group->shader;
 
+				/* port: a first-person group is never the water's */
 				if (!shader ||
+					TEST_FLAG(group->geometry_flags, _rasterizer_geometry_first_person_bit) ||
 					(shader->base.type != _shader_type_transparent_water &&
 						!shader_is_water_decal(shader)))
 				{
