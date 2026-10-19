@@ -92,6 +92,14 @@ enemies left); FALSE for none */
 boolean survival_hud_status(
 	char *text,
 	size_t size);
+/* player_control.c: a local player's D-pad (the Health & Overshield
+charges), and port_hud.c: their charges banked */
+void survival_input(
+	short local_player_index,
+	long unit_index,
+	short gamepad_index);
+short survival_charges(
+	short local_player_index);
 /* New Game's SURVIVAL list: an arena's best run, its waves (0: none) */
 short survival_arena_best(
 	short arena,

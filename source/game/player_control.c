@@ -211,6 +211,7 @@ symbols in this file:
 #include "real_math.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
 #include "dual_wield.h" /* port: port/linux/game/dual_wield.c */
+#include "survival.h" /* port: port/linux/game/survival.c */
 
 /* ---------- constants */
 
@@ -1436,6 +1437,7 @@ static void get_local_player_input_blob(
 					boolean grenade = TEST_FLAG(input->unit_control_flags, _unit_control_throw_grenade_bit);
 					boolean zoom = TEST_FLAG(input->player_control_flags, _player_control_input_zoom_bit);
 
+					survival_input(local_player_index, player->unit_index, gamepad_index);
 					dual_wield_input(local_player_index, player->unit_index, effective_buttons[_button_switch_weapon],
 						effective_buttons[_button_throw_grenade], effective_buttons[_button_action_reload], &rotate,
 						&grenade, &zoom);

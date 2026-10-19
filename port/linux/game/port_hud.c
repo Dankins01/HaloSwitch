@@ -3,7 +3,8 @@ PORT_HUD.C
 
 Lines the port adds to the HUD (hud.c's hud_draw_screen calls in here):
 a survival game's line on top (the next wave's countdown, else the wave's
-enemies left, and the points: survival.c's), and, dual wielding, the left
+enemies left, and the points: survival.c's) and its Health & Overshield
+charges banked, and, dual wielding, the left
 hand's weapon's ammunition under the shields (the right hand's is the
 weapon's own HUD's: dual_wield.c).
 */
@@ -115,5 +116,12 @@ void port_hud_draw(
 		return;
 	if (survival_hud_status(text, sizeof(text)))
 		port_hud_line(text, 0.035f, _justify_center, &white);
+	if (survival_charges(local_player_index) > 0)
+	{
+		real_argb_color green = { 1.0f, 0.55f, 1.0f, 0.55f };
+
+		snprintf(text, sizeof(text), "D-PAD UP: HEALTH & OVERSHIELD x%d", survival_charges(local_player_index));
+		port_hud_line(text, 0.075f, _justify_center, &green);
+	}
 	port_hud_left_weapon(unit_index);
 }

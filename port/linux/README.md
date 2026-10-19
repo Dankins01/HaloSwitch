@@ -217,7 +217,11 @@ heaviest (an Elite assault, or a Flood swarm half again as large), and a
 wing of three Banshees where they fly. Every third wave cleared, a supply
 drop falls nearby: one of the level's weapons and a powerup or grenades.
 The HUD's top line counts down to the next wave, then shows the wave's
-enemies left, and the points.
+enemies left, and the points. A wave's enemies (but a Phantom's, which come with
+it) arrive one at a time, each in the co-op teleport's flash, and its
+vehicles and turrets once all have. The shop's HEALTH & OVERSHIELD banks a
+charge (up to three): the D-pad's up uses one, healing fully and charging
+an overshield.
 
 Before the first wave, the shop's top rows are the run's options: the
 skulls, each making the run harder and its points worth more (Black Eye:

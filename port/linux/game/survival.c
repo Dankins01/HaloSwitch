@@ -34,7 +34,9 @@ Only a local game (one machine) plays survival.
 #include "ai/actors.h"
 #include "ai/ai_scenario_definitions.h"
 #include "ai/ai_script.h"
+#include "effects/effects.h"
 #include "game/game.h"
+#include "input/input.h"
 #include "game/game_allegiance.h"
 #include "game/game_globals.h"
 #include "game/players.h"
@@ -42,6 +44,7 @@ Only a local game (one machine) plays survival.
 #include "items/weapons.h"
 #include "main/main.h"
 #include "math/real_math.h"
+#include "objects/damage.h"
 #include "objects/objects.h"
 #include "physics/collisions.h"
 #include "scenario/scenario.h"
@@ -188,7 +191,13 @@ enum
 	(group_tag: which), the Covenant's vehicles allowed or not */
 	_survival_good_skull,
 	_survival_good_vehicles_option,
+	/* a charge banked, used with the D-pad's up: full health and an
+	overshield */
+	_survival_good_health_charge,
 };
+
+/* the most Health & Overshield charges banked */
+#define SURVIVAL_MAXIMUM_CHARGES 3
 
 /* the skulls: each makes the run harder, its points worth more */
 enum
@@ -214,6 +223,10 @@ static struct
 	{ "CATCH", 1.25f },
 };
 
+/* a testing build's: the weapons free (the prices in survival_goods kept
+for when it is FALSE again) */
+#define SURVIVAL_WEAPONS_FREE_FOR_TESTING TRUE
+
 /* the shop's favourites: the last goods bought, first in its list */
 #define SURVIVAL_FAVOURITES 3
 /* the profile (the save folder's): the skulls and options chosen, the
@@ -235,7 +248,7 @@ struct survival_good
 static struct survival_good const survival_goods[] =
 {
 	{ "MARINE FIRETEAM", 400, _survival_good_fireteam, 0, NULL },
-	{ "OVERSHIELD", 300, _survival_good_equipment, 'eqip', "powerups\\over shield" },
+	{ "HEALTH & OVERSHIELD", 300, _survival_good_health_charge, 0, NULL },
 	{ "ACTIVE CAMOUFLAGE", 350, _survival_good_equipment, 'eqip', "powerups\\active camouflage" },
 	{ "FRAG GRENADES", 75, _survival_good_frag_grenades, 'eqip', "weapons\\frag grenade\\frag grenade" },
 	{ "PLASMA GRENADES", 75, _survival_good_plasma_grenades, 'eqip', "weapons\\plasma grenade\\plasma grenade" },
@@ -359,6 +372,8 @@ static struct
 	short marine_encounter_count;
 	long marine_encounters[MAXIMUM_SURVIVAL_MARINE_SQUADS];
 	short fireteams;
+	/* each local player's Health & Overshield charges */
+	short charges[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS];
 	/* debug.survival_buy's goods bought (a test's) */
 	boolean test_bought;
 	char shop_status[64];
@@ -381,6 +396,18 @@ fixed then), and its points' multiplier (the skulls') */
 	real_vector3d phantom_forward;
 	short phantom_squad;
 	boolean phantom_tried;
+	/* the wave's enemies still to come, one at a time (each teleported in),
+	and what comes once they all have: the wave's vehicles and turrets */
+	short pending_count;
+	short pending_next;
+	struct
+	{
+		short squad_index;
+		short extra;
+	} pending[SURVIVAL_MAXIMUM_WAVE_SIZE];
+	long last_arrival_time;
+	boolean extras_pending;
+	short wing_kind;
 	/* the waves' vehicles, oldest first */
 	short vehicle_count;
 	long vehicles[MAXIMUM_SURVIVAL_VEHICLES];
@@ -464,6 +491,15 @@ static void survival_message(
 			hud_print_message(local_player_index, wide);
 	}
 	platform_log("survival: %s", text);
+}
+
+/* what a good costs now */
+static long survival_good_cost(
+	struct survival_good const *good)
+{
+	if (SURVIVAL_WEAPONS_FREE_FOR_TESTING && good->kind == _survival_good_weapon)
+		return 0;
+	return good->price;
 }
 
 /* ---------- the profile */
@@ -974,6 +1010,11 @@ from the fourth wave, every other) */
 #define SURVIVAL_TURRET_TAG "vehicles\\c gun turret\\c gun turret"
 #define SURVIVAL_TURRET_FIRST_WAVE 4
 
+/* the wave's enemies come one at a time, this often, each in the co-op
+teleport's flash */
+#define SURVIVAL_ARRIVAL_PERIOD (TICKS_PER_SECOND * 2 / 5)
+#define SURVIVAL_ARRIVAL_EFFECT "effects\\coop teleport"
+
 /* the Phantom: its tag, how long it flies in, hovers once the wave has
 come and flies off, how high it hovers above its squad's place and how far
 off it comes from (world units) */
@@ -1427,6 +1468,7 @@ static void survival_spawn_wave(
 	}
 	csmemset(placed_by_squad, 0, sizeof(placed_by_squad));
 	survival.wave_placed = 0;
+	survival.pending_count = survival.pending_next = 0;
 	for (attempts = 0; budget > 0 && attempts < 40; attempts++)
 	{
 		short tier;
@@ -1472,19 +1514,99 @@ static void survival_spawn_wave(
 			break;
 		}
 		group = (short)MIN(group, budget);
-		placed = encounter_survival_place(squad->encounter_index, squad->squad_index, group,
-			placed_by_squad[squad_index], squad->actor_palette_index);
+		/* (the Phantom's group at once, under it; the others to come one
+		at a time) */
+		if (survival.phantom_squad != NONE && attempts == 0)
+		{
+			placed = encounter_survival_place(squad->encounter_index, squad->squad_index, group,
+				placed_by_squad[squad_index], squad->actor_palette_index);
+			survival.wave_placed += placed;
+		}
+		else
+		{
+			short k;
+
+			for (k = 0; k < group && survival.pending_count < SURVIVAL_MAXIMUM_WAVE_SIZE; k++)
+			{
+				survival.pending[survival.pending_count].squad_index = squad_index;
+				survival.pending[survival.pending_count].extra = (short)(placed_by_squad[squad_index] + k);
+				survival.pending_count++;
+			}
+		}
 		placed_by_squad[squad_index] += group;
-		survival.wave_placed += placed;
 		budget -= group;
 	}
-	survival_spawn_vehicles(wing_kind, wing_kind != NONE ? 3 : 0);
-	survival_spawn_turrets();
 	survival.phantom_squad = NONE;
-	survival.wave_start_living = survival.wave_living = survival_living_count();
+	survival.wing_kind = wing_kind;
+	survival.extras_pending = TRUE;
+	survival.last_arrival_time = game_time_get() - SURVIVAL_ARRIVAL_PERIOD;
+	survival.wave_start_living = survival.wave_living = (short)(survival_living_count() + survival.pending_count);
 	survival_score();
 	survival_reveal_player();
-	platform_log("survival: wave %d: %d enemies placed", survival.wave, survival.wave_placed);
+	platform_log("survival: wave %d: %d enemies placed, %d to come", survival.wave, survival.wave_placed,
+		survival.pending_count);
+}
+
+/* the next of the wave's enemies to come, in the teleport's flash; once all
+have, the wave's vehicles and turrets */
+static void survival_arrivals_update(
+	void)
+{
+	long now = game_time_get();
+
+	if (survival.pending_next < survival.pending_count)
+	{
+		struct survival_squad *squad;
+		long before[MAXIMUM_SURVIVAL_TRACKED_ACTORS], after[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+		short types[MAXIMUM_SURVIVAL_TRACKED_ACTORS], living[MAXIMUM_SURVIVAL_TRACKED_ACTORS];
+		short before_count, after_count, i, j;
+
+		if (now - survival.last_arrival_time < SURVIVAL_ARRIVAL_PERIOD)
+			return;
+		survival.last_arrival_time = now;
+		squad = &survival.squads[survival.pending[survival.pending_next].squad_index];
+		before_count = encounter_survival_actors(squad->encounter_index, before, types, living,
+			MAXIMUM_SURVIVAL_TRACKED_ACTORS);
+		if (encounter_survival_place(squad->encounter_index, squad->squad_index, 1,
+			survival.pending[survival.pending_next].extra, squad->actor_palette_index) > 0)
+		{
+			long effect_tag = tag_loaded('effe', SURVIVAL_ARRIVAL_EFFECT);
+
+			survival.wave_placed++;
+			/* (the newcomer's flash) */
+			after_count = encounter_survival_actors(squad->encounter_index, after, types, living,
+				MAXIMUM_SURVIVAL_TRACKED_ACTORS);
+			for (i = 0; effect_tag != NONE && i < after_count; i++)
+			{
+				boolean known = FALSE;
+
+				for (j = 0; j < before_count && !known; j++)
+					known = before[j] == after[i];
+				if (!known)
+				{
+					struct actor_datum *actor = actor_get(after[i]);
+
+					if (actor->meta.unit_index != NONE)
+						effect_new_from_object(effect_tag, NONE, actor->meta.unit_index, NONE, 1.0f, 1.0f, NULL, NULL);
+				}
+			}
+			survival_reveal_player();
+		}
+		else
+		{
+			/* (no room for it: one fewer in the wave) */
+			survival.wave_start_living--;
+		}
+		survival.pending_next++;
+		return;
+	}
+	if (survival.extras_pending)
+	{
+		survival.extras_pending = FALSE;
+		survival_spawn_vehicles(survival.wing_kind, survival.wing_kind != NONE ? 3 : 0);
+		survival_spawn_turrets();
+		platform_log("survival: wave %d: all %d come", survival.wave, survival.wave_placed);
+	}
 }
 
 /* the players healed, the weapons carried filled, the grenades topped up */
@@ -1756,6 +1878,7 @@ static void survival_begin(
 	survival.points = config_integer("debug.survival_points");
 	survival.tracked_count = 0;
 	survival.fireteams = 0;
+	csmemset(survival.charges, 0, sizeof(survival.charges));
 	/* (the player and the Marines allies, as the level's scripts make
 	them, which survival leaves out: without it, a fireteam fights the
 	player; a betrayal still turns them, as in the campaign) */
@@ -2001,6 +2124,7 @@ void survival_update(
 	}
 
 	case _survival_state_wave:
+		survival_arrivals_update();
 		if (now - survival.last_reveal_time >= SURVIVAL_REVEAL_PERIOD)
 		{
 			survival.last_reveal_time = now;
@@ -2018,15 +2142,16 @@ void survival_update(
 		}
 		if (now - survival.last_count_time >= SURVIVAL_COUNT_PERIOD)
 		{
-			short living = survival_living_count();
+			short living = (short)(survival_living_count() + survival.pending_count - survival.pending_next);
 
 			survival.last_count_time = now;
 			survival_score();
 			if (living != survival.wave_living)
 				platform_log("survival: wave %d: %d of %d left", survival.wave, living, survival.wave_start_living);
 			survival.wave_living = living;
-			if (living == 0 || (living <= SURVIVAL_STRAGGLERS && now - survival.state_time >= SURVIVAL_STRAGGLER_TIME) ||
-				now - survival.state_time >= SURVIVAL_WAVE_TIME_LIMIT)
+			if (survival.pending_next >= survival.pending_count && !survival.extras_pending &&
+				(living == 0 || (living <= SURVIVAL_STRAGGLERS && now - survival.state_time >= SURVIVAL_STRAGGLER_TIME) ||
+				now - survival.state_time >= SURVIVAL_WAVE_TIME_LIMIT))
 			{
 				survival.kills += survival.wave_start_living - living;
 				survival.points += survival_scaled(SURVIVAL_WAVE_BONUS * survival.wave);
@@ -2083,6 +2208,7 @@ static void survival_shop_stock(
 			stocked = survival.marine_squad_count > 0;
 			break;
 		case _survival_good_ammunition:
+		case _survival_good_health_charge:
 			stocked = TRUE;
 			break;
 		default:
@@ -2313,7 +2439,7 @@ char const *survival_shop_good_name(
 long survival_shop_good_price(
 	short index)
 {
-	return VALID_INDEX(index, survival.good_count) ? survival_goods[survival.goods[index]].price : 0;
+	return VALID_INDEX(index, survival.good_count) ? survival_good_cost(&survival_goods[survival.goods[index]]) : 0;
 }
 
 /* the shop's price column: the points, or a skull's points multiplier */
@@ -2331,7 +2457,7 @@ char const *survival_shop_good_price_text(
 	else if (good->kind == _survival_good_vehicles_option)
 		text[0] = 0;
 	else
-		snprintf(text, sizeof(text), "%ld", good->price);
+		snprintf(text, sizeof(text), "%ld", survival_good_cost(good));
 	return text;
 }
 
@@ -2403,9 +2529,9 @@ boolean survival_shop_buy(
 		survival_shop_say("NOT WHILE YOU ARE DEAD");
 		return FALSE;
 	}
-	if (survival.points < good->price)
+	if (survival.points < survival_good_cost(good))
 	{
-		survival_shop_say("%s: %ld MORE POINTS NEEDED", good->name, good->price - survival.points);
+		survival_shop_say("%s: %ld MORE POINTS NEEDED", good->name, survival_good_cost(good) - survival.points);
 		return FALSE;
 	}
 	switch (good->kind)
@@ -2467,6 +2593,17 @@ boolean survival_shop_buy(
 		bought = TRUE;
 		break;
 	}
+	case _survival_good_health_charge:
+		if (!VALID_INDEX(local_player_index, MAXIMUM_NUMBER_OF_LOCAL_PLAYERS) ||
+			survival.charges[local_player_index] >= SURVIVAL_MAXIMUM_CHARGES)
+		{
+			survival_shop_say("%s: YOU HAVE %d (THE MOST)", good->name, SURVIVAL_MAXIMUM_CHARGES);
+			return FALSE;
+		}
+		survival.charges[local_player_index]++;
+		survival_shop_say("%s: %d BANKED, D-PAD UP TO USE", good->name, survival.charges[local_player_index]);
+		bought = TRUE;
+		break;
 	case _survival_good_fireteam:
 		bought = survival_shop_fireteam();
 		survival_shop_say(bought ? "MARINE FIRETEAM: ON THE WAY" : "MARINE FIRETEAM: NONE CAN COME");
@@ -2499,7 +2636,7 @@ boolean survival_shop_buy(
 	}
 	if (!bought)
 		return FALSE;
-	survival.points -= good->price;
+	survival.points -= survival_good_cost(good);
 	/* (a favourite now, the latest first; the list as it was until the shop
 	opens again) */
 	{
@@ -2647,4 +2784,39 @@ short survival_arena_best(
 	if (points)
 		*points = survival_profile.best[arena].points;
 	return survival_profile.best[arena].wave;
+}
+
+/* player_control.c, each tick a local player controls a unit: the D-pad's
+up uses a Health & Overshield charge */
+void survival_input(
+	short local_player_index,
+	long unit_index,
+	short gamepad_index)
+{
+	struct gamepad_state const *gamepad;
+
+	if (!survival.active || !VALID_INDEX(local_player_index, MAXIMUM_NUMBER_OF_LOCAL_PLAYERS) || unit_index == NONE ||
+		gamepad_index == NONE || !(gamepad = input_get_gamepad_state(gamepad_index)))
+	{
+		return;
+	}
+	if (gamepad->buttons[_gamepad_binary_button_dpad_up] != 1)
+		return;
+	if (survival.charges[local_player_index] <= 0)
+	{
+		survival_message("NO HEALTH & OVERSHIELD BANKED (THE SHOP SELLS THEM)");
+		return;
+	}
+	survival.charges[local_player_index]--;
+	unit_scripting_set_current_vitality_of(unit_index, 1.0e6f, 1.0e6f);
+	object_double_charge_shield(unit_index);
+	survival_message("HEALTH & OVERSHIELD: %d LEFT", survival.charges[local_player_index]);
+}
+
+/* port_hud.c: a local player's charges banked */
+short survival_charges(
+	short local_player_index)
+{
+	return survival.active && VALID_INDEX(local_player_index, MAXIMUM_NUMBER_OF_LOCAL_PLAYERS) ?
+		survival.charges[local_player_index] : 0;
 }
